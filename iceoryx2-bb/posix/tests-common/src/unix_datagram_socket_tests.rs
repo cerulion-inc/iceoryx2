@@ -19,6 +19,7 @@ use iceoryx2_bb_concurrency::atomic::{AtomicBool, Ordering};
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_posix::barrier::*;
 use iceoryx2_bb_posix::clock::{Time, nanosleep};
+use iceoryx2_bb_container::semantic_string::SemanticString;
 use iceoryx2_bb_posix::creation_mode::*;
 use iceoryx2_bb_posix::file::*;
 use iceoryx2_bb_posix::file_descriptor::*;
@@ -409,4 +410,76 @@ pub fn abandoning_sender_closes_file_descriptor_and_socket_is_still_cleaned_up_f
     drop(sut_receiver);
 
     assert_that!(File::does_exist(&socket_name).unwrap(), eq false);
+}
+
+/// Read the process umask without changing it.
+///
+/// There is no read only form: the only way to observe the mask is to set one
+/// and take the previous value back, so this sets and immediately restores.
+fn read_umask() -> posix::mode_t {
+    unsafe {
+        let previous = posix::umask(0o022);
+        posix::umask(previous);
+        previous
+    }
+}
+
+#[test]
+pub fn concurrent_bind_does_not_change_the_process_umask() {
+    create_test_directory();
+
+    let before = read_umask();
+
+    // Several binds at once. One bind alone restores what it saved; two
+    // overlapping ones each save what the other installed, so the restore puts
+    // back a value that was never the original and the process keeps it.
+    //
+    // Measured here: the mask reads `0o7177` afterwards, not `0o177`. The
+    // complement of the permission carries the setuid, setgid and sticky bits
+    // along with the access bits, so those ride into the process mask too.
+    const CONCURRENT_BINDS: usize = 8;
+    let paths: Vec<FilePath> = (0..CONCURRENT_BINDS).map(|_| generate_file_path()).collect();
+
+    thread_scope(|scope| {
+        let mut handles = Vec::new();
+        for path in &paths {
+            handles.push(
+                scope
+                    .thread_builder()
+                    .spawn(|| {
+                        let _receiver = UnixDatagramReceiverBuilder::new(path)
+                            .permission(Permission::OWNER_READ_WRITE)
+                            .creation_mode(CreationMode::PurgeAndCreate)
+                            .create();
+                    })
+                    .unwrap(),
+            );
+        }
+        // Every bind has returned before the mask is read again.
+        drop(handles);
+        Ok(())
+    })
+    .unwrap();
+
+    let after = read_umask();
+
+    // Every bind has returned, so nothing is holding a mask on purpose.
+    assert_that!(after, eq before);
+
+    // The consequence, measured rather than inferred: with a leaked `0o177`
+    // the owner search bit is masked away, so a directory created afterwards
+    // cannot be entered and every stat of a path inside it fails with EACCES.
+    // Raw `mkdir` on purpose: this asks what the kernel does with the process
+    // mask, which is the thing under test.
+    let dir_path = generate_file_path();
+    let dir_c = dir_path.as_c_str();
+    assert_that!(unsafe { posix::mkdir(dir_c, 0o777) }, eq 0);
+
+    let mut attr = core::mem::MaybeUninit::<posix::stat_t>::uninit();
+    assert_that!(unsafe { posix::stat(dir_c, attr.as_mut_ptr()) }, eq 0);
+    let mode = unsafe { attr.assume_init() }.st_mode & 0o777;
+
+    // The owner search bit is what a leaked `0o177` removes, and it is what
+    // every later stat inside the directory depends on.
+    assert_that!(mode & 0o100, eq 0o100);
 }

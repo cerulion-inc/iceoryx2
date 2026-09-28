@@ -134,7 +134,6 @@ use iceoryx2_bb_concurrency::atomic::AtomicBool;
 use iceoryx2_bb_concurrency::atomic::Ordering;
 use iceoryx2_bb_container::semantic_string::*;
 use iceoryx2_bb_elementary::enum_gen;
-use iceoryx2_bb_elementary::scope_guard::ScopeGuardBuilder;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_system_types::file_path::FilePath;
 use iceoryx2_log::{fail, fatal_panic, trace};
@@ -429,27 +428,38 @@ impl UnixDatagramSocket {
         let socket_address = self.create_socket_address();
         let ptr: *const posix::sockaddr_un = &socket_address;
 
+        // The permission is applied AFTER the bind, with `chmod`, rather than by
+        // moving the process umask around it.
+        //
+        // `umask` is per PROCESS, not per thread and not per call. Installing
+        // one for the duration of a bind reaches every other thread: a thread
+        // that calls `mkdir` in that window gets whatever this mask leaves it,
+        // and with `OWNER_READ_WRITE` the mask is `0o177`, which clears the
+        // OWNER SEARCH bit. The directory is created `0o600`, and every later
+        // `stat` of a path inside it fails with `EACCES`, in a thread that has
+        // nothing to do with iceoryx2.
+        //
+        // The window this trades it for is smaller and is the caller's own
+        // socket only: between `bind` and `chmod` the socket file exists at the
+        // ambient `0o777 & !umask`. Closing that fully needs the socket to be
+        // bound inside a directory only this user can reach, which is a layout
+        // change rather than a fix to this function.
+        if unsafe {
+            posix::bind(
+                self.file_descriptor.native_handle(),
+                ptr as *const posix::sockaddr,
+                size_of::<posix::sockaddr_un>() as u32,
+            )
+        } == 0
         {
-            let _mask = ScopeGuardBuilder::new(0 as posix::mode_t)
-                .on_init(|mask| -> Result<(), ()> {
-                    *mask = unsafe { posix::umask((!permission).bits()) };
-                    Ok(())
-                })
-                .on_drop(|mask| unsafe {
-                    posix::umask(*mask);
-                })
-                .create();
-
-            if unsafe {
-                posix::bind(
-                    self.file_descriptor.native_handle(),
-                    ptr as *const posix::sockaddr,
-                    size_of::<posix::sockaddr_un>() as u32,
-                )
-            } == 0
-            {
-                return Ok(());
+            if unsafe { posix::chmod(self.name.as_c_str(), permission.bits()) } != 0 {
+                let msg = "Failed to set the socket permission after bind";
+                handle_errno!(UnixDatagramReceiverCreationError, from self,
+                    Errno::EACCES => (InsufficientPermissions, "{} due to insufficient permissions.", msg),
+                    v => (UnknownError(v as i32), "{} since an unknown error occurred ({}).", msg, v)
+                );
             }
+            return Ok(());
         }
 
         let msg = "Failed to bind socket";
