@@ -15,11 +15,11 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use iceoryx2_bb_concurrency::atomic::{AtomicBool, Ordering};
+use iceoryx2_bb_concurrency::atomic::{AtomicBool, AtomicUsize, Ordering};
+use iceoryx2_bb_container::semantic_string::SemanticString;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_posix::barrier::*;
 use iceoryx2_bb_posix::clock::{Time, nanosleep};
-use iceoryx2_bb_container::semantic_string::SemanticString;
 use iceoryx2_bb_posix::creation_mode::*;
 use iceoryx2_bb_posix::file::*;
 use iceoryx2_bb_posix::file_descriptor::*;
@@ -426,6 +426,8 @@ fn read_umask() -> posix::mode_t {
 
 #[test]
 pub fn concurrent_bind_does_not_change_the_process_umask() {
+    let _watchdog = Watchdog::new();
+
     create_test_directory();
 
     let before = read_umask();
@@ -438,7 +440,24 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
     // complement of the permission carries the setuid, setgid and sticky bits
     // along with the access bits, so those ride into the process mask too.
     const CONCURRENT_BINDS: usize = 8;
-    let paths: Vec<FilePath> = (0..CONCURRENT_BINDS).map(|_| generate_file_path()).collect();
+    let paths: Vec<FilePath> = (0..CONCURRENT_BINDS)
+        .map(|_| generate_file_path())
+        .collect();
+
+    // The overlap is what makes the masks collide, so it is forced rather than
+    // left to the scheduler: no thread enters `create` until every thread has
+    // reached the barrier, and the saves and restores then interleave on every
+    // run instead of only on an unlucky one.
+    let handle = BarrierHandle::new();
+    let barrier = BarrierBuilder::new(CONCURRENT_BINDS as u32)
+        .create(&handle)
+        .unwrap();
+
+    // A bind that failed would install no mask at all, so a discarded error
+    // would let this test pass over code that never ran the interleaving. The
+    // count carries the outcome to the calling thread, where it cannot be lost
+    // the way a panic inside a joined thread can.
+    let successful_binds = AtomicUsize::new(0);
 
     thread_scope(|scope| {
         let mut handles = Vec::new();
@@ -447,10 +466,13 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
                 scope
                     .thread_builder()
                     .spawn(|| {
-                        let _receiver = UnixDatagramReceiverBuilder::new(path)
+                        barrier.wait();
+                        let receiver = UnixDatagramReceiverBuilder::new(path)
                             .permission(Permission::OWNER_READ_WRITE)
                             .creation_mode(CreationMode::PurgeAndCreate)
                             .create();
+                        assert_that!(receiver, is_ok);
+                        successful_binds.fetch_add(1, Ordering::Relaxed);
                     })
                     .unwrap(),
             );
@@ -460,6 +482,8 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
         Ok(())
     })
     .unwrap();
+
+    assert_that!(successful_binds.load(Ordering::Relaxed), eq CONCURRENT_BINDS);
 
     let after = read_umask();
 
