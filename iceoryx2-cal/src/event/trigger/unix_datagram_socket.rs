@@ -24,9 +24,11 @@ use alloc::format;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
+#[cfg(not(target_os = "android"))]
+use iceoryx2_bb_posix::file::{File, FileRemoveError};
 use iceoryx2_bb_posix::{
     directory::*,
-    file::{CreationMode, File, FileRemoveError},
+    file::CreationMode,
     file_descriptor::FileDescriptorBased,
     file_descriptor_set::SynchronousMultiplexing,
     permission::Permission,
@@ -195,18 +197,27 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> WaiterInterface<E, ()
         name: &FileName,
         config: &Configuration,
     ) -> Result<bool, NamedConceptRemoveError> {
-        let origin = "UnixDatagramWaiter::remove()";
-        let msg = "Unable to remove socket";
-        let full_path = config.path_for(name);
-        match File::remove(&full_path) {
-            Ok(v) => Ok(v),
-            Err(FileRemoveError::InsufficientPermissions) => {
-                fail!(from origin, with NamedConceptRemoveError::InsufficientPermissions,
+        #[cfg(target_os = "android")]
+        {
+            let _ = (name, config);
+            Ok(false)
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let origin = "UnixDatagramWaiter::remove()";
+            let msg = "Unable to remove socket";
+            let full_path = config.path_for(name);
+            match File::remove(&full_path) {
+                Ok(v) => Ok(v),
+                Err(FileRemoveError::InsufficientPermissions) => {
+                    fail!(from origin, with NamedConceptRemoveError::InsufficientPermissions,
                     "{msg} due to insufficient permissions.");
-            }
-            Err(e) => {
-                fail!(from origin, with NamedConceptRemoveError::InternalError,
+                }
+                Err(e) => {
+                    fail!(from origin, with NamedConceptRemoveError::InternalError,
                     "{msg} due to an internal error. [{e:?}]");
+                }
             }
         }
     }
