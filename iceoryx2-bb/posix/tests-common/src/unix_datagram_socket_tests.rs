@@ -94,6 +94,60 @@ pub fn send_receive_works() {
     assert_that!(send_data, eq receive_data);
 }
 
+#[cfg(target_os = "android")]
+#[test]
+pub fn abstract_socket_delivery_existence_and_recreation_work() {
+    create_test_directory();
+    let socket_name = generate_file_path();
+    let oversized_name = FilePath::new(&[b'a'; 108]).unwrap();
+
+    assert!(matches!(
+        UnixDatagramReceiverBuilder::new(&oversized_name).create(),
+        Err(
+            UnixDatagramReceiverCreationError::UnixDatagramCreationError(
+                UnixDatagramCreationError::SocketNameTooLong
+            )
+        )
+    ));
+
+    assert!(!UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+
+    {
+        let receiver = UnixDatagramReceiverBuilder::new(&socket_name)
+            .creation_mode(CreationMode::CreateExclusive)
+            .create()
+            .unwrap();
+        assert!(UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+
+        let duplicate = UnixDatagramReceiverBuilder::new(&socket_name)
+            .creation_mode(CreationMode::CreateExclusive)
+            .create();
+        assert!(matches!(
+            duplicate,
+            Err(UnixDatagramReceiverCreationError::AddressAlreadyInUse)
+                | Err(UnixDatagramReceiverCreationError::SocketFileAlreadyExists)
+        ));
+
+        let sender = UnixDatagramSenderBuilder::new(&socket_name)
+            .create()
+            .unwrap();
+        let expected = [1_u8, 3, 3, 7, 13];
+        sender.try_send(&expected).unwrap();
+
+        let mut received = [0_u8; 5];
+        receiver.blocking_receive(&mut received).unwrap();
+        assert_eq!(received, expected);
+    }
+
+    assert!(!UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+
+    let _receiver = UnixDatagramReceiverBuilder::new(&socket_name)
+        .creation_mode(CreationMode::CreateExclusive)
+        .create()
+        .unwrap();
+    assert!(UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+}
+
 #[test]
 pub fn adjust_buffer_size_works() {
     create_test_directory();
@@ -375,7 +429,10 @@ pub fn abandoning_receiver_leaves_the_socket_but_closes_the_file_descriptor() {
     let close_result = unsafe { posix::close(fd) };
     let errno = Errno::get();
 
+    #[cfg(not(target_os = "android"))]
     assert_that!(UnixDatagramReceiver::does_exist(&socket_name).unwrap(), eq true);
+    #[cfg(target_os = "android")]
+    assert_that!(UnixDatagramReceiver::does_exist(&socket_name).unwrap(), eq false);
     assert_that!(close_result, eq - 1);
     assert_that!(errno, eq Errno::EBADF);
 
@@ -460,25 +517,21 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
     let successful_binds = AtomicUsize::new(0);
 
     thread_scope(|scope| {
-        let mut handles = Vec::new();
         for path in &paths {
-            handles.push(
-                scope
-                    .thread_builder()
-                    .spawn(|| {
-                        barrier.wait();
-                        let receiver = UnixDatagramReceiverBuilder::new(path)
-                            .permission(Permission::OWNER_READ_WRITE)
-                            .creation_mode(CreationMode::PurgeAndCreate)
-                            .create();
-                        assert_that!(receiver, is_ok);
-                        successful_binds.fetch_add(1, Ordering::Relaxed);
-                    })
-                    .unwrap(),
-            );
+            scope
+                .thread_builder()
+                .spawn(|| {
+                    barrier.wait();
+                    let receiver = UnixDatagramReceiverBuilder::new(path)
+                        .permission(Permission::OWNER_READ_WRITE)
+                        .creation_mode(CreationMode::PurgeAndCreate)
+                        .create();
+                    assert_that!(receiver, is_ok);
+                    successful_binds.fetch_add(1, Ordering::Relaxed);
+                })
+                .unwrap();
         }
         // Every bind has returned before the mask is read again.
-        drop(handles);
         Ok(())
     })
     .unwrap();
