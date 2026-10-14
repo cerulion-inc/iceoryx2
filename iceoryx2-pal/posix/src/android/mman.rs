@@ -13,11 +13,12 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
-use crate::posix::{Errno, closedir, opendir, readdir, types::*};
+use crate::posix::{Errno, closedir, readdir, types::*};
 use alloc::ffi::CString;
 use core::ffi::CStr;
 use std::ffi::OsStr;
 use std::io::{self, ErrorKind};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use std::sync::OnceLock;
 
 enum ShmError {
     Validation(Errno),
+    Errno(Errno),
     Io(io::Error),
     Libc,
 }
@@ -53,7 +55,7 @@ fn resolved_shm_dir() -> &'static PathBuf {
     })
 }
 
-fn object_path(name: &CStr) -> Result<PathBuf, Errno> {
+fn object_name(name: &CStr) -> Result<&[u8], Errno> {
     let name = name.to_bytes();
     if name.len() < 2 || name[0] != b'/' {
         return Err(Errno::EINVAL);
@@ -67,7 +69,7 @@ fn object_path(name: &CStr) -> Result<PathBuf, Errno> {
         return Err(Errno::EINVAL);
     }
 
-    Ok(resolved_shm_dir().join(OsStr::from_bytes(object_name)))
+    Ok(object_name)
 }
 
 fn create_shm_dir(path: &Path) -> io::Result<()> {
@@ -103,18 +105,52 @@ fn io_error_errno(error: io::Error) -> Errno {
     }
 }
 
+fn open_shm_dir(path: &Path) -> Result<OwnedFd, ShmError> {
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| ShmError::Validation(Errno::EINVAL))?;
+    // SAFETY: `path` is a live NUL-terminated directory path for the duration of the call.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(ShmError::Libc);
+    }
+
+    // SAFETY: `fd` is an open descriptor whose ownership moves into `dir_fd`.
+    let dir_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut status = core::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `status` points to writable storage for `libc::stat`, and `dir_fd` is open.
+    if unsafe { libc::fstat(dir_fd.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(ShmError::Libc);
+    }
+    // SAFETY: `fstat` initialized the complete structure on success.
+    let status = unsafe { status.assume_init() };
+    // SAFETY: `geteuid` takes no arguments and has no memory-safety preconditions.
+    let effective_uid = unsafe { libc::geteuid() };
+    if status.st_uid != effective_uid || status.st_mode & 0o022 != 0 {
+        return Err(ShmError::Errno(Errno::EACCES));
+    }
+
+    Ok(dir_fd)
+}
+
 fn open_in(name: &CStr, oflag: int, mode: mode_t) -> Result<int, ShmError> {
-    let path = object_path(name).map_err(ShmError::Validation)?;
+    let object_name = object_name(name).map_err(ShmError::Validation)?;
     if oflag & libc::O_CREAT != 0 {
         create_shm_dir(resolved_shm_dir()).map_err(ShmError::Io)?;
     }
 
-    let path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| ShmError::Validation(Errno::EINVAL))?;
-    // SAFETY: `path` is a NUL-terminated path built from the validated name.
+    let dir_fd = open_shm_dir(resolved_shm_dir())?;
+    let object_name = CString::new(object_name).map_err(|_| ShmError::Validation(Errno::EINVAL))?;
+    // SAFETY: `dir_fd` is an open directory descriptor and `object_name` is a
+    // NUL-terminated validated name containing no '/'.
     let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            object_name.as_ptr(),
             oflag | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             mode,
         )
@@ -123,11 +159,12 @@ fn open_in(name: &CStr, oflag: int, mode: mode_t) -> Result<int, ShmError> {
 }
 
 fn unlink_in(name: &CStr) -> Result<(), ShmError> {
-    let path = object_path(name).map_err(ShmError::Validation)?;
-    let path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| ShmError::Validation(Errno::EINVAL))?;
-    // SAFETY: `path` is a NUL-terminated path built from the validated name.
-    if unsafe { libc::unlink(path.as_ptr()) } == 0 {
+    let object_name = object_name(name).map_err(ShmError::Validation)?;
+    let dir_fd = open_shm_dir(resolved_shm_dir())?;
+    let object_name = CString::new(object_name).map_err(|_| ShmError::Validation(Errno::EINVAL))?;
+    // SAFETY: `dir_fd` is an open directory descriptor and `object_name` is a
+    // NUL-terminated validated name containing no '/'.
+    if unsafe { libc::unlinkat(dir_fd.as_raw_fd(), object_name.as_ptr(), 0) } == 0 {
         Ok(())
     } else {
         Err(ShmError::Libc)
@@ -158,6 +195,10 @@ pub unsafe fn shm_open(name: *const c_char, oflag: int, mode: mode_t) -> int {
             Errno::set(errno);
             -1
         }
+        Err(ShmError::Errno(errno)) => {
+            Errno::set(errno);
+            -1
+        }
         Err(ShmError::Io(error)) => {
             Errno::set(io_error_errno(error));
             -1
@@ -174,6 +215,10 @@ pub unsafe fn shm_unlink(name: *const c_char) -> int {
             Errno::set(errno);
             -1
         }
+        Err(ShmError::Errno(errno)) => {
+            Errno::set(errno);
+            -1
+        }
         Err(ShmError::Io(error)) => {
             Errno::set(io_error_errno(error));
             -1
@@ -184,17 +229,21 @@ pub unsafe fn shm_unlink(name: *const c_char) -> int {
 
 pub unsafe fn shm_list() -> Vec<[i8; 256]> {
     let mut result = vec![];
-    let Ok(path) = CString::new(resolved_shm_dir().as_os_str().as_bytes()) else {
+    let Ok(dir_fd) = open_shm_dir(resolved_shm_dir()) else {
         return result;
     };
-    // SAFETY: `path` is a live NUL-terminated directory path.
-    let dir = unsafe { opendir(path.as_ptr()) };
+    let fd = dir_fd.into_raw_fd();
+    // SAFETY: `fd` is an open directory descriptor; on success, `fdopendir`
+    // takes ownership and `closedir` below releases it.
+    let dir = unsafe { libc::fdopendir(fd) };
     if dir.is_null() {
+        // SAFETY: POSIX specifies that `fdopendir` leaves `fd` open on failure.
+        unsafe { libc::close(fd) };
         return result;
     }
 
     loop {
-        // SAFETY: `dir` was returned by opendir and remains open until the loop ends.
+        // SAFETY: `dir` was returned by `fdopendir` and remains open until the loop ends.
         let entry = unsafe { readdir(dir) };
         if entry.is_null() {
             break;
@@ -214,7 +263,7 @@ pub unsafe fn shm_list() -> Vec<[i8; 256]> {
         result.push(temp);
     }
 
-    // SAFETY: `dir` was returned by opendir and has not been closed.
+    // SAFETY: `dir` was returned by `fdopendir` and has not been closed.
     unsafe { closedir(dir) };
     result
 }

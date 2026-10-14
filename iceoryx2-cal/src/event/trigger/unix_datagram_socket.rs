@@ -200,6 +200,7 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> WaiterInterface<E, ()
         #[cfg(target_os = "android")]
         {
             let _ = (name, config);
+            // Abstract sockets disappear with their receiver fd, so there is no filesystem entry to remove.
             Ok(false)
         }
 
