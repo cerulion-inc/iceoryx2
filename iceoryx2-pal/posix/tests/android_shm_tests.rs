@@ -27,7 +27,7 @@ fn list_contains(name: &[u8]) -> bool {
     // SAFETY: shm_list returns fixed-size names copied from NUL-terminated dirent entries.
     unsafe { shm_list() }.iter().any(|entry| {
         // SAFETY: each shm_list entry is NUL-terminated within its 256-byte buffer.
-        unsafe { CStr::from_ptr(entry.as_ptr()).to_bytes() == name }
+        unsafe { CStr::from_ptr(entry.as_ptr().cast()).to_bytes() == name }
     })
 }
 
@@ -121,6 +121,119 @@ fn shared_file_descriptors_map_the_same_object_and_unlink_it() {
     // SAFETY: `name` remains a live NUL-terminated string.
     assert_eq!(unsafe { shm_open(name.as_ptr(), libc::O_RDWR, 0) }, -1);
     assert_errno(libc::ENOENT);
+}
+
+const CHILD_NAME_ENV: &str = "IOX2_ANDROID_SHM_CHILD_NAME";
+const CROSS_PROCESS_LENGTH: usize = 4096;
+const PARENT_VALUE: u64 = 0x1d2c_3b4a_5968_7786;
+const CHILD_VALUE: u64 = 0x8877_6655_4433_2211;
+
+fn map_shared(fd: i32) -> *mut u64 {
+    // SAFETY: `fd` refers to an object of at least CROSS_PROCESS_LENGTH bytes.
+    let mapping = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            CROSS_PROCESS_LENGTH,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    assert_ne!(
+        mapping,
+        libc::MAP_FAILED,
+        "map shared-memory object: {}",
+        io::Error::last_os_error()
+    );
+    mapping.cast::<u64>()
+}
+
+#[test]
+fn child_process_side_of_cross_process_sharing() {
+    let Some(name) = std::env::var_os(CHILD_NAME_ENV) else {
+        return;
+    };
+    let name = CString::new(name.into_encoded_bytes()).expect("name contains no NUL bytes");
+
+    // SAFETY: `name` is a live NUL-terminated string.
+    let fd = unsafe { shm_open(name.as_ptr(), libc::O_RDWR, 0) };
+    assert!(
+        fd >= 0,
+        "child opens the parent's object: {}",
+        io::Error::last_os_error()
+    );
+    let mapping = map_shared(fd);
+
+    // SAFETY: the mapping spans CROSS_PROCESS_LENGTH bytes, so both u64 slots are valid.
+    unsafe {
+        assert_eq!(std::ptr::read_volatile(mapping), PARENT_VALUE);
+        std::ptr::write_volatile(mapping.add(1), CHILD_VALUE);
+    }
+
+    // SAFETY: `mapping` is a live mapping of CROSS_PROCESS_LENGTH bytes.
+    assert_eq!(
+        unsafe { libc::munmap(mapping.cast(), CROSS_PROCESS_LENGTH) },
+        0
+    );
+    // SAFETY: `fd` is open and is not used after closing.
+    assert_eq!(unsafe { libc::close(fd) }, 0);
+}
+
+#[test]
+fn separate_processes_share_one_object() {
+    let name = unique_name("cross_process");
+    // SAFETY: `name` is a live NUL-terminated string.
+    let fd = unsafe {
+        shm_open(
+            name.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o600,
+        )
+    };
+    assert!(
+        fd >= 0,
+        "create shared-memory object: {}",
+        io::Error::last_os_error()
+    );
+    // SAFETY: `fd` is open and names the newly created object.
+    assert_eq!(
+        unsafe { libc::ftruncate(fd, CROSS_PROCESS_LENGTH as libc::off_t) },
+        0
+    );
+    let mapping = map_shared(fd);
+    // SAFETY: the mapping spans CROSS_PROCESS_LENGTH bytes, so the first u64 slot is valid.
+    unsafe { std::ptr::write_volatile(mapping, PARENT_VALUE) };
+
+    let status =
+        std::process::Command::new(std::env::current_exe().expect("test binary path is available"))
+            .args([
+                "--exact",
+                "child_process_side_of_cross_process_sharing",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD_NAME_ENV, name.to_str().expect("name is UTF-8"))
+            .status()
+            .expect("spawn child test process");
+    assert!(status.success(), "child process failed: {status}");
+
+    // SAFETY: the mapping spans CROSS_PROCESS_LENGTH bytes, so the second u64 slot is valid.
+    assert_eq!(
+        unsafe { std::ptr::read_volatile(mapping.add(1)) },
+        CHILD_VALUE,
+        "child process wrote through its own mapping"
+    );
+
+    // SAFETY: `mapping` is a live mapping of CROSS_PROCESS_LENGTH bytes.
+    assert_eq!(
+        unsafe { libc::munmap(mapping.cast(), CROSS_PROCESS_LENGTH) },
+        0
+    );
+    // SAFETY: `fd` is open and is not used after closing.
+    assert_eq!(unsafe { libc::close(fd) }, 0);
+    // SAFETY: `name` remains a live NUL-terminated string.
+    assert_eq!(unsafe { shm_unlink(name.as_ptr()) }, 0);
 }
 
 #[test]
