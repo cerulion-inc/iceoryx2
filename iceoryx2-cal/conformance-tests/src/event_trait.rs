@@ -814,6 +814,8 @@ pub mod event_trait {
 
         assert_that!(Sut::does_exist_cfg(&name, &config), eq Ok(true));
         assert_that!(unsafe { Sut::remove_cfg(&name, &config).unwrap() }, eq true);
+        assert_that!(unsafe { Sut::remove_cfg(&name, &config) }, eq Ok(false));
+        assert_that!(Sut::does_exist_cfg(&name, &config), eq Ok(false));
     }
 
     #[conformance_test]

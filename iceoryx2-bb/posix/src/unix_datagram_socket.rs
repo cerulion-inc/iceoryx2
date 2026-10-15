@@ -125,25 +125,33 @@
 //! ```
 
 use core::mem::MaybeUninit;
+#[cfg(not(target_os = "android"))]
+use core::mem::size_of;
 use core::ptr::NonNull;
-use core::{mem::size_of, time::Duration};
+use core::time::Duration;
 
 use alloc::format;
 
 use iceoryx2_bb_concurrency::atomic::AtomicBool;
 use iceoryx2_bb_concurrency::atomic::Ordering;
+#[cfg(not(target_os = "android"))]
 use iceoryx2_bb_container::semantic_string::*;
 use iceoryx2_bb_elementary::enum_gen;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_system_types::file_path::FilePath;
-use iceoryx2_log::{fail, fatal_panic, trace};
+#[cfg(not(target_os = "android"))]
+use iceoryx2_log::fatal_panic;
+use iceoryx2_log::{fail, trace};
 use iceoryx2_pal_posix::posix::{MemZeroedStruct, errno::Errno};
 
 use crate::clock::AsTimeval;
 use crate::file_descriptor::{FileDescriptor, FileDescriptorBased, FileDescriptorManagement};
 use crate::file_descriptor_set::SynchronousMultiplexing;
+#[cfg(not(target_os = "android"))]
 use crate::file_type::FileType;
-use crate::metadata::{Metadata, MetadataFromPathError};
+#[cfg(not(target_os = "android"))]
+use crate::metadata::Metadata;
+use crate::metadata::MetadataFromPathError;
 use crate::socket_ancillary::*;
 use crate::{config::UNIX_DOMAIN_SOCKET_PATH_LENGTH, file::*, permission::Permission};
 
@@ -304,6 +312,27 @@ enum_gen! {
 
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(i16::MAX as _);
 
+#[cfg(target_os = "android")]
+fn create_android_socket_address(
+    name: &FilePath,
+) -> Option<(posix::sockaddr_un, posix::socklen_t)> {
+    let mut socket_address = posix::sockaddr_un::new_zeroed();
+    socket_address.sun_family = posix::AF_UNIX;
+
+    let name_bytes = name.as_str().as_bytes();
+    let path_capacity = core::mem::size_of_val(&socket_address.sun_path);
+    if name_bytes.len() + 1 > path_capacity {
+        return None;
+    }
+
+    for (index, byte) in name_bytes.iter().enumerate() {
+        socket_address.sun_path[index + 1] = *byte as _;
+    }
+
+    let address_length = core::mem::offset_of!(posix::sockaddr_un, sun_path) + 1 + name_bytes.len();
+    Some((socket_address, address_length as posix::socklen_t))
+}
+
 #[derive(Debug)]
 struct UnixDatagramSocket {
     name: FilePath,
@@ -409,6 +438,38 @@ impl UnixDatagramSocket {
         );
     }
 
+    #[cfg(target_os = "android")]
+    fn bind(&self, _permission: Permission) -> Result<(), UnixDatagramReceiverCreationError> {
+        let (socket_address, socket_address_length) = create_android_socket_address(&self.name)
+            .expect("socket name was validated at creation");
+        let ptr: *const posix::sockaddr_un = &socket_address;
+
+        // SAFETY: the socket descriptor is valid and the address is initialized.
+        if unsafe {
+            posix::bind(
+                self.file_descriptor.native_handle(),
+                ptr as *const posix::sockaddr,
+                socket_address_length,
+            )
+        } == 0
+        {
+            // On Android, access to the socket is governed by SELinux, not file mode.
+            return Ok(());
+        }
+
+        let msg = "Failed to bind socket";
+        handle_errno!(UnixDatagramReceiverCreationError, from self,
+            Errno::EACCES => (InsufficientPermissions, "{} due to insufficient permissions.", msg),
+            Errno::EADDRINUSE => (AddressAlreadyInUse, "{} since the address is already in use.", msg),
+            Errno::ENOENT => (PathDoesNotExist, "{} since the path does not exist.", msg),
+            Errno::ENOTDIR => (PathDoesNotExist, "{} since the path does not exist.", msg),
+            Errno::ENOBUFS => (InsufficientResources, "{} due to insufficient resources.", msg),
+            Errno::EROFS => (ReadOnlyFileSytem, "{} since it would reside on an read-only file system.", msg),
+            v => (UnknownError(v as i32), "{} since an unknown error has occurred ({}).", msg, v)
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn create_socket_address(&self) -> posix::sockaddr_un {
         let mut socket_address = posix::sockaddr_un::new_zeroed();
         socket_address.sun_family = posix::AF_UNIX;
@@ -424,6 +485,7 @@ impl UnixDatagramSocket {
         socket_address
     }
 
+    #[cfg(not(target_os = "android"))]
     fn bind(&self, permission: Permission) -> Result<(), UnixDatagramReceiverCreationError> {
         let socket_address = self.create_socket_address();
         let ptr: *const posix::sockaddr_un = &socket_address;
@@ -474,6 +536,38 @@ impl UnixDatagramSocket {
         );
     }
 
+    #[cfg(target_os = "android")]
+    fn connect(&self) -> Result<(), UnixDatagramSenderCreationError> {
+        let (socket_address, socket_address_length) = create_android_socket_address(&self.name)
+            .expect("socket name was validated at creation");
+        let ptr: *const posix::sockaddr_un = &socket_address;
+        // SAFETY: the socket descriptor is valid and the address is initialized.
+        if unsafe {
+            posix::connect(
+                self.file_descriptor.native_handle(),
+                ptr as *const posix::sockaddr,
+                socket_address_length,
+            )
+        } == 0
+        {
+            return Ok(());
+        }
+
+        let msg = "Failed to connect";
+        handle_errno!(UnixDatagramSenderCreationError, from self,
+            Errno::ENOENT => (DoesNotExist, "{} since the unix datagram receiver does not exist.", msg),
+            Errno::ECONNREFUSED => (DoesNotExist, "{} since the unix datagram receiver does not exist.", msg),
+            Errno::EACCES => (InsufficientPermissions, "{} due to insufficient permissions.", msg),
+            Errno::EADDRINUSE => (AlreadyConnected, "{} since it is already connected.", msg),
+            Errno::EINTR => (Interrupt, "{} since an interrupt was received.", msg),
+            Errno::ECONNRESET => (ConnectionReset, "{} since the host reset the connection request.", msg),
+            Errno::ENOBUFS => (InsufficientResources, "{} since there is no buffer space available.", msg),
+            Errno::EINPROGRESS => (WouldBlock, "{} since the operation would block the process. Allow blocking and the connection can may be established.", msg),
+            v => (UnknownError(v as i32), "{} caused by an unknown error ({}).", msg, v)
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn connect(&self) -> Result<(), UnixDatagramSenderCreationError> {
         let socket_address = self.create_socket_address();
         let ptr: *const posix::sockaddr_un = &socket_address;
@@ -503,9 +597,18 @@ impl UnixDatagramSocket {
     }
 
     fn new(name: &FilePath) -> Result<Self, UnixDatagramCreationError> {
-        if name.len() > UNIX_DOMAIN_SOCKET_PATH_LENGTH {
+        #[cfg(target_os = "android")]
+        let name_is_too_long = create_android_socket_address(name).is_none();
+        #[cfg(target_os = "android")]
+        let max_name_length = UNIX_DOMAIN_SOCKET_PATH_LENGTH - 1;
+        #[cfg(not(target_os = "android"))]
+        let name_is_too_long = name.len() > UNIX_DOMAIN_SOCKET_PATH_LENGTH;
+        #[cfg(not(target_os = "android"))]
+        let max_name_length = UNIX_DOMAIN_SOCKET_PATH_LENGTH;
+
+        if name_is_too_long {
             fail!(with UnixDatagramCreationError::SocketNameTooLong,
-                "The name \"{}\" is too long for a UnixDatagramSocket name. Maximum supported length is {}.", name, UNIX_DOMAIN_SOCKET_PATH_LENGTH);
+                "The name \"{}\" is too long for a UnixDatagramSocket name. Maximum supported length is {}.", name, max_name_length);
         }
 
         let raw_fd = unsafe { posix::socket(posix::PF_UNIX as posix::int, posix::SOCK_DGRAM, 0) };
@@ -796,8 +899,13 @@ impl Abandonable for UnixDatagramReceiver {
 
 impl Drop for UnixDatagramReceiver {
     fn drop(&mut self) {
-        fatal_panic!(from self, when File::remove(&self.socket.name), "Failed to remove socket file.");
-        trace!(from self, "removed and stop listening");
+        #[cfg(not(target_os = "android"))]
+        {
+            fatal_panic!(from self, when File::remove(&self.socket.name), "Failed to remove socket file.");
+            trace!(from self, "removed and stop listening");
+        }
+        #[cfg(target_os = "android")]
+        trace!(from self, "stopped listening");
     }
 }
 
@@ -808,13 +916,18 @@ impl UnixDatagramReceiver {
             socket: fail!(from config, when UnixDatagramSocket::new(&config.name), "{}.", msg),
         };
 
-        let does_file_exist = fail!(from new_socket, when Self::does_exist(&config.name), "Unable to determine if socket exists.");
+        #[cfg(not(target_os = "android"))]
+        {
+            let does_file_exist = fail!(from new_socket, when Self::does_exist(&config.name), "Unable to determine if socket exists.");
 
-        if config.creation_mode == CreationMode::PurgeAndCreate && does_file_exist {
-            fail!(from new_socket, when File::remove(&config.name), "{} since the already existing socket could not be removed.", msg);
-        } else if config.creation_mode == CreationMode::CreateExclusive && does_file_exist {
-            fail!(from new_socket, with UnixDatagramReceiverCreationError::SocketFileAlreadyExists, "{} since it already exists.", msg);
+            if config.creation_mode == CreationMode::PurgeAndCreate && does_file_exist {
+                fail!(from new_socket, when File::remove(&config.name), "{} since the already existing socket could not be removed.", msg);
+            } else if config.creation_mode == CreationMode::CreateExclusive && does_file_exist {
+                fail!(from new_socket, with UnixDatagramReceiverCreationError::SocketFileAlreadyExists, "{} since it already exists.", msg);
+            }
         }
+        #[cfg(target_os = "android")]
+        let _ = &config.creation_mode;
 
         fail!(from new_socket, when new_socket.socket.bind(config.permission), "{} since the socket could not be bind.", msg);
 
@@ -828,9 +941,57 @@ impl UnixDatagramReceiver {
     }
 
     pub fn does_exist(file_path: &FilePath) -> Result<bool, MetadataFromPathError> {
-        let origin = "UnixDatagramReceiver::does_exist()";
-        let msg = format!("Unable to determine if unix datagram socket \"{file_path}\" exists");
-        Metadata::does_exist(&file_path.into(), origin, &msg, FileType::Socket)
+        #[cfg(target_os = "android")]
+        {
+            let (socket_address, socket_address_length) = create_android_socket_address(file_path)
+                .ok_or(MetadataFromPathError::MaxSupportedPathLengthExceeded)?;
+            // SAFETY: AF_UNIX and SOCK_DGRAM are valid socket arguments.
+            let probe_fd = unsafe {
+                posix::socket(
+                    posix::PF_UNIX as posix::int,
+                    posix::SOCK_DGRAM | posix::SOCK_NONBLOCK,
+                    0,
+                )
+            };
+            if probe_fd < 0 {
+                return Err(MetadataFromPathError::UnknownError(Errno::get() as i32));
+            }
+
+            // SAFETY: the address is initialized and its exact length was computed above.
+            let connect_result = unsafe {
+                posix::connect(
+                    probe_fd,
+                    &socket_address as *const posix::sockaddr_un as *const posix::sockaddr,
+                    socket_address_length,
+                )
+            };
+            let connect_error = if connect_result == 0 {
+                None
+            } else {
+                Some(Errno::get())
+            };
+
+            // SAFETY: probe_fd is the descriptor returned by socket above.
+            if unsafe { posix::close(probe_fd) } == -1 {
+                return Err(MetadataFromPathError::UnknownError(Errno::get() as i32));
+            }
+
+            match connect_error {
+                None => Ok(true),
+                Some(Errno::ECONNREFUSED) => Ok(false),
+                Some(Errno::EACCES) | Some(Errno::EPERM) => {
+                    Err(MetadataFromPathError::InsufficientPermissions)
+                }
+                Some(error) => Err(MetadataFromPathError::UnknownError(error as i32)),
+            }
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let origin = "UnixDatagramReceiver::does_exist()";
+            let msg = format!("Unable to determine if unix datagram socket \"{file_path}\" exists");
+            Metadata::does_exist(&file_path.into(), origin, &msg, FileType::Socket)
+        }
     }
 
     /// Returns the name of the socket
