@@ -277,18 +277,13 @@ impl<T: Copy + Debug> CommunicationChannelCreator<T, Channel<T>> for Creator<T> 
 
         // create Unix Datagram Receiver
         let full_name = self.config.path_for(&self.channel_name);
+        let receiver = self.create_socket(&full_name)?;
         #[cfg(target_os = "android")]
         self.create_marker_file(&full_name)?;
 
-        let receiver = self.create_socket(&full_name);
-        #[cfg(target_os = "android")]
-        if receiver.is_err() {
-            let _ = File::remove(&full_name);
-        }
-
         Ok(Receiver {
             name: self.channel_name,
-            receiver: receiver?,
+            receiver,
             _phantom_data: PhantomData,
         })
     }
