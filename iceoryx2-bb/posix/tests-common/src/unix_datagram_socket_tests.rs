@@ -94,6 +94,29 @@ pub fn send_receive_works() {
     assert_that!(send_data, eq receive_data);
 }
 
+#[test]
+pub fn sender_for_missing_receiver_reports_does_not_exist() {
+    create_test_directory();
+    let socket_name = generate_file_path();
+
+    assert!(matches!(
+        UnixDatagramSenderBuilder::new(&socket_name).create(),
+        Err(UnixDatagramSenderCreationError::DoesNotExist)
+    ));
+
+    drop(
+        UnixDatagramReceiverBuilder::new(&socket_name)
+            .creation_mode(CreationMode::PurgeAndCreate)
+            .create()
+            .unwrap(),
+    );
+
+    assert!(matches!(
+        UnixDatagramSenderBuilder::new(&socket_name).create(),
+        Err(UnixDatagramSenderCreationError::DoesNotExist)
+    ));
+}
+
 #[cfg(target_os = "android")]
 #[test]
 pub fn abstract_socket_delivery_existence_and_recreation_work() {

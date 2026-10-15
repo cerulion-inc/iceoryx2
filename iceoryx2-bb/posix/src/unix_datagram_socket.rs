@@ -556,9 +556,9 @@ impl UnixDatagramSocket {
         let msg = "Failed to connect";
         handle_errno!(UnixDatagramSenderCreationError, from self,
             Errno::ENOENT => (DoesNotExist, "{} since the unix datagram receiver does not exist.", msg),
+            Errno::ECONNREFUSED => (DoesNotExist, "{} since the unix datagram receiver does not exist.", msg),
             Errno::EACCES => (InsufficientPermissions, "{} due to insufficient permissions.", msg),
             Errno::EADDRINUSE => (AlreadyConnected, "{} since it is already connected.", msg),
-            Errno::ECONNREFUSED => (ConnectionRefused, "{} since the connection was refused.", msg),
             Errno::EINTR => (Interrupt, "{} since an interrupt was received.", msg),
             Errno::ECONNRESET => (ConnectionReset, "{} since the host reset the connection request.", msg),
             Errno::ENOBUFS => (InsufficientResources, "{} since there is no buffer space available.", msg),
