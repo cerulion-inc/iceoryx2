@@ -24,7 +24,10 @@ use iceoryx2_bb_posix::metadata::MetadataFromPathError;
 use iceoryx2_bb_posix::{
     directory::*, file::*, system_configuration::SystemInfo, unix_datagram_socket::*,
 };
+use iceoryx2_bb_system_types::file_path::FilePath;
 use iceoryx2_bb_system_types::path::Path;
+#[cfg(target_os = "android")]
+use iceoryx2_log::warn;
 use iceoryx2_log::{fail, fatal_panic, trace};
 
 pub use crate::communication_channel::*;
@@ -110,7 +113,12 @@ impl<T: Copy + Debug> NamedConceptMgmt for Channel<T> {
 
         let full_path = cfg.path_for(name);
 
-        match UnixDatagramReceiver::does_exist(&full_path) {
+        #[cfg(target_os = "android")]
+        let does_exist = File::does_exist(&full_path);
+        #[cfg(not(target_os = "android"))]
+        let does_exist = UnixDatagramReceiver::does_exist(&full_path);
+
+        match does_exist {
             Ok(true) => Ok(true),
             Ok(false) => Ok(false),
             Err(v) => {
@@ -269,7 +277,53 @@ impl<T: Copy + Debug> CommunicationChannelCreator<T, Channel<T>> for Creator<T> 
 
         // create Unix Datagram Receiver
         let full_name = self.config.path_for(&self.channel_name);
-        let receiver = UnixDatagramReceiverBuilder::new(&full_name)
+        #[cfg(target_os = "android")]
+        self.create_marker_file(&full_name)?;
+
+        let receiver = self.create_socket(&full_name);
+        #[cfg(target_os = "android")]
+        if receiver.is_err() {
+            let _ = File::remove(&full_name);
+        }
+
+        Ok(Receiver {
+            name: self.channel_name,
+            receiver: receiver?,
+            _phantom_data: PhantomData,
+        })
+    }
+}
+
+impl<T: Copy + Debug> Creator<T> {
+    #[cfg(target_os = "android")]
+    fn create_marker_file(
+        &self,
+        full_name: &FilePath,
+    ) -> Result<(), CommunicationChannelCreateError> {
+        let msg = "Unable to create receiver";
+        match FileBuilder::new(full_name)
+            .creation_mode(CreationMode::CreateExclusive)
+            .permission(SOCKET_PERMISSIONS)
+            .create()
+        {
+            Ok(_) => Ok(()),
+            Err(FileCreationError::FileAlreadyExists) => {
+                fail!(from self, with CommunicationChannelCreateError::AlreadyExists,
+                    "{} since a channel with that name already exists.", msg);
+            }
+            Err(e) => {
+                fail!(from self, with CommunicationChannelCreateError::InternalFailure,
+                    "{} since the channel file could not be created ({:?}).", msg, e);
+            }
+        }
+    }
+
+    fn create_socket(
+        &self,
+        full_name: &FilePath,
+    ) -> Result<UnixDatagramReceiver, CommunicationChannelCreateError> {
+        let msg = "Unable to create receiver";
+        let receiver = UnixDatagramReceiverBuilder::new(full_name)
             .creation_mode(CreationMode::CreateExclusive)
             .permission(SOCKET_PERMISSIONS)
             .create();
@@ -292,11 +346,7 @@ impl<T: Copy + Debug> CommunicationChannelCreator<T, Channel<T>> for Creator<T> 
             }
         };
 
-        Ok(Receiver {
-            name: self.channel_name,
-            receiver,
-            _phantom_data: PhantomData,
-        })
+        Ok(receiver)
     }
 }
 
@@ -457,6 +507,15 @@ pub struct Receiver<T: Debug> {
     name: FileName,
     receiver: UnixDatagramReceiver,
     _phantom_data: PhantomData<T>,
+}
+
+#[cfg(target_os = "android")]
+impl<T: Debug> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        if let Err(e) = File::remove(self.receiver.name()) {
+            warn!(from self, "Unable to remove the channel file ({:?}).", e);
+        }
+    }
 }
 
 impl<T: Copy + Debug> Abandonable for Receiver<T> {
