@@ -12,16 +12,13 @@
 
 const EXPIRY_MESSAGE: &str = "Watchdog expired. Aborting.";
 
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "android")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub use posix_platform::Watchdog;
 
-#[cfg(all(
-    feature = "std",
-    any(target_os = "windows", target_os = "macos", target_os = "android")
-))]
+#[cfg(all(feature = "std", any(target_os = "windows", target_os = "macos")))]
 pub use std_platform::Watchdog;
 
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "android")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod posix_platform {
     use core::time::Duration;
 
@@ -126,10 +123,7 @@ mod posix_platform {
     }
 }
 
-#[cfg(all(
-    feature = "std",
-    any(target_os = "windows", target_os = "macos", target_os = "android")
-))]
+#[cfg(all(feature = "std", any(target_os = "windows", target_os = "macos")))]
 mod std_platform {
     use alloc::sync::Arc;
     use core::time::Duration;
