@@ -12,6 +12,10 @@
 
 use crate::named_concept::*;
 
+#[cfg(target_os = "android")]
+use iceoryx2_bb_concurrency::atomic::{AtomicU32, Ordering};
+#[cfg(target_os = "android")]
+use iceoryx2_bb_posix::process::Process;
 #[cfg(not(target_os = "android"))]
 use iceoryx2_bb_posix::testing::generate_file_path;
 use iceoryx2_bb_posix::{
@@ -34,7 +38,15 @@ pub fn generate_isolated_config<T: NamedConceptMgmt>() -> T::Configuration {
     };
 
     #[cfg(target_os = "android")]
-    let prefix = FileName::new(b"iox2_test").unwrap();
+    let prefix = {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let prefix = alloc::format!(
+            "t{:x}_{:x}_",
+            Process::from_self().id().value(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        FileName::new(prefix.as_bytes()).unwrap()
+    };
     #[cfg(not(target_os = "android"))]
     let prefix = generate_file_path().file_name();
 
