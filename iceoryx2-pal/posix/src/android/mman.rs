@@ -21,7 +21,7 @@ use std::io::{self, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 enum ShmError {
@@ -31,28 +31,47 @@ enum ShmError {
     Libc,
 }
 
-fn resolved_shm_dir() -> &'static PathBuf {
-    static SHM_DIR: OnceLock<PathBuf> = OnceLock::new();
+fn configured_shm_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("CERULION_SHM_DIR").map(PathBuf::from)
+        && !path.as_os_str().is_empty()
+        && path.is_absolute()
+    {
+        return path;
+    }
 
-    SHM_DIR.get_or_init(|| {
-        if let Some(path) = std::env::var_os("CERULION_SHM_DIR").map(PathBuf::from)
-            && !path.as_os_str().is_empty()
-            && path.is_absolute()
-        {
-            return path;
-        }
+    if let Some(path) = std::env::var_os("TMPDIR").map(PathBuf::from)
+        && path.is_absolute()
+    {
+        return path.join("cerulion-shm");
+    }
 
-        if let Some(path) = std::env::var_os("TMPDIR").map(PathBuf::from)
-            && path.is_absolute()
-        {
-            return path.join("cerulion-shm");
-        }
+    let shared_memory_directory = iceoryx2_pal_configuration::SHARED_MEMORY_DIRECTORY
+        .strip_suffix(b"/")
+        .unwrap_or(iceoryx2_pal_configuration::SHARED_MEMORY_DIRECTORY);
+    PathBuf::from(OsStr::from_bytes(shared_memory_directory))
+}
 
-        let shared_memory_directory = iceoryx2_pal_configuration::SHARED_MEMORY_DIRECTORY
-            .strip_suffix(b"/")
-            .unwrap_or(iceoryx2_pal_configuration::SHARED_MEMORY_DIRECTORY);
-        PathBuf::from(OsStr::from_bytes(shared_memory_directory))
-    })
+/// Drops `.` components and trailing separators so the final component is the
+/// directory itself, which `O_NOFOLLOW` then refuses when it is a symlink.
+/// A path containing `..` is refused, since its final component would resolve
+/// through whatever directory precedes it.
+fn normalized_shm_dir(path: &Path) -> Result<PathBuf, Errno> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Errno::EINVAL);
+    }
+    Ok(path.components().collect())
+}
+
+fn resolved_shm_dir() -> Result<&'static Path, ShmError> {
+    static SHM_DIR: OnceLock<Result<PathBuf, Errno>> = OnceLock::new();
+
+    match SHM_DIR.get_or_init(|| normalized_shm_dir(&configured_shm_dir())) {
+        Ok(path) => Ok(path),
+        Err(errno) => Err(ShmError::Validation(*errno)),
+    }
 }
 
 fn object_name(name: &CStr) -> Result<&[u8], Errno> {
@@ -139,11 +158,12 @@ fn open_shm_dir(path: &Path) -> Result<OwnedFd, ShmError> {
 
 fn open_in(name: &CStr, oflag: int, mode: mode_t) -> Result<int, ShmError> {
     let object_name = object_name(name).map_err(ShmError::Validation)?;
+    let shm_dir = resolved_shm_dir()?;
     if oflag & libc::O_CREAT != 0 {
-        create_shm_dir(resolved_shm_dir()).map_err(ShmError::Io)?;
+        create_shm_dir(shm_dir).map_err(ShmError::Io)?;
     }
 
-    let dir_fd = open_shm_dir(resolved_shm_dir())?;
+    let dir_fd = open_shm_dir(shm_dir)?;
     let object_name = CString::new(object_name).map_err(|_| ShmError::Validation(Errno::EINVAL))?;
     // SAFETY: `dir_fd` is an open directory descriptor and `object_name` is a
     // NUL-terminated validated name containing no '/'.
@@ -160,7 +180,7 @@ fn open_in(name: &CStr, oflag: int, mode: mode_t) -> Result<int, ShmError> {
 
 fn unlink_in(name: &CStr) -> Result<(), ShmError> {
     let object_name = object_name(name).map_err(ShmError::Validation)?;
-    let dir_fd = open_shm_dir(resolved_shm_dir())?;
+    let dir_fd = open_shm_dir(resolved_shm_dir()?)?;
     let object_name = CString::new(object_name).map_err(|_| ShmError::Validation(Errno::EINVAL))?;
     // SAFETY: `dir_fd` is an open directory descriptor and `object_name` is a
     // NUL-terminated validated name containing no '/'.
@@ -229,7 +249,7 @@ pub unsafe fn shm_unlink(name: *const c_char) -> int {
 
 pub unsafe fn shm_list() -> Vec<[i8; 256]> {
     let mut result = vec![];
-    let Ok(dir_fd) = open_shm_dir(resolved_shm_dir()) else {
+    let Ok(dir_fd) = resolved_shm_dir().and_then(open_shm_dir) else {
         return result;
     };
     let fd = dir_fd.into_raw_fd();
