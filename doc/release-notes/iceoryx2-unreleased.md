@@ -23,6 +23,7 @@
 -->
 
 * [#1](https://github.com/eclipse-iceoryx/iceoryx2/issues/1) Example text
+* [#2142](https://github.com/eclipse-iceoryx/iceoryx2/issues/2142) Initialize the node counter of the global management segment when the segment is created
 
 ### Refactoring
 
