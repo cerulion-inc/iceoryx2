@@ -14,7 +14,7 @@
 //! receive data without restrictions.
 
 use core::ptr::NonNull;
-use core::{fmt::Debug, marker::PhantomData, mem::MaybeUninit};
+use core::{fmt::Debug, marker::PhantomData, mem::ManuallyDrop, mem::MaybeUninit};
 
 use alloc::format;
 use alloc::vec;
@@ -283,7 +283,7 @@ impl<T: Copy + Debug> CommunicationChannelCreator<T, Channel<T>> for Creator<T> 
 
         Ok(Receiver {
             name: self.channel_name,
-            receiver,
+            receiver: ManuallyDrop::new(receiver),
             _phantom_data: PhantomData,
         })
     }
@@ -500,14 +500,25 @@ impl<T: Copy + Debug> CommunicationChannelSender<T> for Sender<T> {
 #[derive(Debug)]
 pub struct Receiver<T: Debug> {
     name: FileName,
-    receiver: UnixDatagramReceiver,
+    // Dropped by hand in `Drop`, so that on Android the socket is closed
+    // before its marker file is removed.
+    receiver: ManuallyDrop<UnixDatagramReceiver>,
     _phantom_data: PhantomData<T>,
 }
 
-#[cfg(target_os = "android")]
 impl<T: Debug> Drop for Receiver<T> {
     fn drop(&mut self) {
-        if let Err(e) = File::remove(self.receiver.name()) {
+        #[cfg(target_os = "android")]
+        let marker = *self.receiver.name();
+
+        // Close the socket first. On Android the abstract address stays bound
+        // until the socket is closed, so a creator that sees the marker gone
+        // must find the address free.
+        // SAFETY: `receiver` is dropped exactly once, here, and never used after.
+        unsafe { ManuallyDrop::drop(&mut self.receiver) };
+
+        #[cfg(target_os = "android")]
+        if let Err(e) = File::remove(&marker) {
             warn!(from self, "Unable to remove the channel file ({:?}).", e);
         }
     }
@@ -516,7 +527,7 @@ impl<T: Debug> Drop for Receiver<T> {
 impl<T: Copy + Debug> Abandonable for Receiver<T> {
     unsafe fn abandon_in_place(mut this: NonNull<Self>) {
         let this = unsafe { this.as_mut() };
-        unsafe { UnixDatagramReceiver::abandon_in_place(NonNull::from_mut(&mut this.receiver)) };
+        unsafe { UnixDatagramReceiver::abandon_in_place(NonNull::from_mut(&mut *this.receiver)) };
     }
 }
 
