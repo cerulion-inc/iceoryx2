@@ -193,7 +193,14 @@ _build-integrations-zenoh toolchain target_triplet profile has_nostd has_tests e
 [private]
 _build-integrations-ros2 toolchain target_triplet profile has_nostd has_tests extra_args:
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -eo pipefail
+
+    just _ros2-require-sourced
+    # Message crates built from source take precedence over the distribution's.
+    if [ -f "{{INTEGRATIONS_ROS2_MESSAGES_INSTALL_BASE}}/setup.bash" ]; then
+        source "{{INTEGRATIONS_ROS2_MESSAGES_INSTALL_BASE}}/setup.bash"
+    fi
+    export CARGO_TARGET_DIR="{{INTEGRATIONS_ROS2_CARGO_TARGET_DIR}}"
 
     if [ "{{has_nostd}}" = "true" ]; then
         echo "Error: the ros2 workspace cannot be built with --no_std" >&2

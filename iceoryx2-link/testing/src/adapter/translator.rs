@@ -15,15 +15,11 @@ use alloc::string::String;
 use core::convert::Infallible;
 
 use iceoryx2_link_adapter::{
-    HeaderTranscoder, PayloadTranscoder, PublishSubscribeTranslation, Region, SampleTranscoders,
-    SampleTranscodings, TranscodeError, Translator,
+    LocalTypes, Region, SampleBytesRef, SampleShape, SampleTranscoders, TranscodeError, Transcoder,
+    Translator,
 };
-use iceoryx2_link_backend::service_description::{
-    PublishSubscribeTypes, ServiceTypes, TypeDescription,
-};
+use iceoryx2_link_backend::service_description::{SampleTypes, TypeDescription};
 use iceoryx2_log::{fail, origin};
-
-use crate::adapter::FakeEndpointTypes;
 
 /// The prefix of a type name on the middleware, its data byte-swapped.
 const SWAPPED: &str = "swapped:";
@@ -36,47 +32,32 @@ const WORD: usize = 8;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FakeSwapTranslator;
 
-impl Translator for FakeSwapTranslator {
-    type EndpointTypes = FakeEndpointTypes;
+impl Translator<SampleShape> for FakeSwapTranslator {
+    type RemoteTypes = SampleTypes;
+    type Transcoders = SampleTranscoders<SwapHeader, SwapPayload>;
     type Error = Infallible;
-    type Transcoder = SwapTranscoder;
 
-    fn local(&self, remote: &FakeEndpointTypes) -> Result<ServiceTypes, Self::Error> {
+    fn local(&self, remote: &SampleTypes) -> Result<LocalTypes<SampleShape>, Self::Error> {
         Ok(map_types(remote, unswapped))
     }
 
-    fn remote(&self, local: &ServiceTypes) -> Result<FakeEndpointTypes, Self::Error> {
+    fn remote(&self, local: &LocalTypes<SampleShape>) -> Result<SampleTypes, Self::Error> {
         Ok(map_types(local, swapped))
     }
 
-    fn publish_subscribe(
+    fn transcoders(
         &self,
-        local: &ServiceTypes,
-        _: &FakeEndpointTypes,
-    ) -> Result<PublishSubscribeTranslation<SwapTranscoder>, Self::Error> {
-        Ok(match local {
-            ServiceTypes::PublishSubscribe(_) => PublishSubscribeTranslation::Transcode {
-                outbound: SampleTranscodings::TRANSCODE,
-                inbound: SampleTranscodings::TRANSCODE,
-                transcoder: SampleTranscoders {
-                    headers: SwapHeader,
-                    payloads: SwapPayload,
-                },
-            },
-            ServiceTypes::Event => PublishSubscribeTranslation::Passthrough,
-        })
+        _: &LocalTypes<SampleShape>,
+        _: &SampleTypes,
+    ) -> Result<Self::Transcoders, Self::Error> {
+        Ok(SampleTranscoders::TranscodeBoth(SwapHeader, SwapPayload))
     }
 }
 
-fn map_types(types: &ServiceTypes, name: fn(&str) -> String) -> ServiceTypes {
-    match types {
-        ServiceTypes::PublishSubscribe(types) => {
-            ServiceTypes::PublishSubscribe(PublishSubscribeTypes {
-                payload: map_type(&types.payload, name),
-                user_header: map_type(&types.user_header, name),
-            })
-        }
-        ServiceTypes::Event => ServiceTypes::Event,
+fn map_types(types: &SampleTypes, name: fn(&str) -> String) -> SampleTypes {
+    SampleTypes {
+        payload: map_type(&types.payload, name),
+        user_header: map_type(&types.user_header, name),
     }
 }
 
@@ -95,10 +76,6 @@ fn unswapped(name: &str) -> String {
     String::from(name.strip_prefix(SWAPPED).unwrap_or(name))
 }
 
-/// Reverses the bytes of every eight-byte word of both regions, in either
-/// direction.
-pub type SwapTranscoder = SampleTranscoders<SwapHeader, SwapPayload>;
-
 /// Reverses the bytes of every eight-byte word of the header.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SwapHeader;
@@ -115,7 +92,7 @@ fn swap_words<R: Region>(bytes: &[u8], into: &mut R) -> Result<(), TranscodeErro
         Err(refusal) => {
             fail!(
                 from origin,
-                with TranscodeError::Rejected(refusal),
+                with TranscodeError::from(refusal),
                 "The region rejected the {} bytes to swap", bytes.len()
             );
         }
@@ -128,43 +105,43 @@ fn swap_words<R: Region>(bytes: &[u8], into: &mut R) -> Result<(), TranscodeErro
     Ok(())
 }
 
-impl HeaderTranscoder for SwapHeader {
-    type Failure = Infallible;
+impl<'a> Transcoder<SampleBytesRef<'a>> for SwapHeader {
+    type Error = Infallible;
 
     fn encode<R: Region>(
         &self,
-        header: &[u8],
+        local: SampleBytesRef<'a>,
         into: &mut R,
-    ) -> Result<(), TranscodeError<Self::Failure>> {
-        swap_words(header, into)
+    ) -> Result<(), TranscodeError<Self::Error>> {
+        swap_words(local.header, into)
     }
 
     fn decode<R: Region>(
         &self,
-        wire: &[u8],
+        wire: SampleBytesRef<'a>,
         into: &mut R,
-    ) -> Result<(), TranscodeError<Self::Failure>> {
-        swap_words(wire, into)
+    ) -> Result<(), TranscodeError<Self::Error>> {
+        swap_words(wire.header, into)
     }
 }
 
-impl PayloadTranscoder for SwapPayload {
-    type Failure = Infallible;
+impl<'a> Transcoder<SampleBytesRef<'a>> for SwapPayload {
+    type Error = Infallible;
 
     fn encode<R: Region>(
         &self,
-        payload: &[u8],
+        local: SampleBytesRef<'a>,
         into: &mut R,
-    ) -> Result<(), TranscodeError<Self::Failure>> {
-        swap_words(payload, into)
+    ) -> Result<(), TranscodeError<Self::Error>> {
+        swap_words(local.payload, into)
     }
 
     fn decode<R: Region>(
         &self,
-        wire: &[u8],
+        wire: SampleBytesRef<'a>,
         into: &mut R,
-    ) -> Result<(), TranscodeError<Self::Failure>> {
-        swap_words(wire, into)
+    ) -> Result<(), TranscodeError<Self::Error>> {
+        swap_words(wire.payload, into)
     }
 }
 
@@ -179,50 +156,16 @@ pub fn swapped_bytes(value: u64) -> [u8; WORD] {
 mod tests {
     use super::*;
 
-    use alloc::vec::Vec;
-
     use iceoryx2::service::static_config::message_type_details::{TypeDetail, TypeVariant};
     use iceoryx2_bb_testing::assert_that;
-
-    const VALUE: u64 = 0x0102_0304_0506_0708;
-
-    #[test]
-    fn a_header_word_is_reversed_in_both_directions() {
-        let mut wire = Vec::new();
-        SwapHeader
-            .encode(&VALUE.to_ne_bytes(), &mut wire)
-            .expect("encoding succeeds");
-        assert_that!(wire, eq swapped_bytes(VALUE).to_vec());
-
-        let mut local = Vec::new();
-        SwapHeader
-            .decode(&wire, &mut local)
-            .expect("decoding succeeds");
-        assert_that!(local, eq VALUE.to_ne_bytes().to_vec());
-    }
-
-    #[test]
-    fn a_payload_word_is_reversed_in_both_directions() {
-        let mut wire = Vec::new();
-        SwapPayload
-            .encode(&VALUE.to_ne_bytes(), &mut wire)
-            .expect("encoding succeeds");
-        assert_that!(wire, eq swapped_bytes(VALUE).to_vec());
-
-        let mut local = Vec::new();
-        SwapPayload
-            .decode(&wire, &mut local)
-            .expect("decoding succeeds");
-        assert_that!(local, eq VALUE.to_ne_bytes().to_vec());
-    }
 
     #[test]
     fn the_type_names_round_trip() {
         let description = TypeDescription::from(&TypeDetail::new::<u64>(TypeVariant::FixedSize));
-        let local = ServiceTypes::PublishSubscribe(PublishSubscribeTypes {
+        let local = SampleTypes {
             payload: description.clone(),
             user_header: description,
-        });
+        };
 
         let remote = FakeSwapTranslator.remote(&local).expect("never fails");
 

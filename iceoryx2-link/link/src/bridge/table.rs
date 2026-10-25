@@ -12,7 +12,6 @@
 
 use alloc::collections::BTreeMap;
 
-use iceoryx2::identifiers::UniqueNodeId;
 use iceoryx2::node::Node;
 use iceoryx2::service::messaging_pattern::MessagingPattern;
 use iceoryx2::service::service_hash::ServiceHash;
@@ -71,14 +70,14 @@ impl<B: Bridged> BridgeTable<B> {
                 bridge.seen = epoch;
                 return Ok(());
             }
-            trace!(from origin, "Closing the {:?} bridge of {}, its resolution changed", bridge.pattern, bridge.name);
+            trace!(from origin, "Closing the {:?} bridge of \"{}\", its resolution changed", bridge.pattern, bridge.name);
             self.bridges.remove(&hash);
         }
         let pattern = description.settings().pattern.messaging_pattern();
         let bridged = fail!(
             from origin,
             when B::open(node, backend, description, remote),
-            "Failed to open the {:?} bridge of {}", pattern, description.name()
+            "Failed to open the {:?} bridge of \"{}\"", pattern, description.name()
         );
         let bridge = Bridge {
             bridged,
@@ -89,7 +88,7 @@ impl<B: Bridged> BridgeTable<B> {
             failure: None,
         };
 
-        trace!(from origin, "Opened {:?} bridge of {}", bridge.pattern, bridge.name);
+        trace!(from origin, "Opened {:?} bridge of \"{}\"", bridge.pattern, bridge.name);
 
         self.bridges.insert(hash, bridge);
         Ok(())
@@ -102,7 +101,7 @@ impl<B: Bridged> BridgeTable<B> {
         self.bridges.retain(|_, bridge| {
             let keep = bridge.seen == epoch;
             if !keep {
-                trace!(from origin, "Closing the {:?} bridge of {}", bridge.pattern, bridge.name);
+                trace!(from origin, "Closing the {:?} bridge of \"{}\"", bridge.pattern, bridge.name);
             }
             keep
         });
@@ -119,10 +118,14 @@ impl<B: Bridged> BridgeTable<B> {
     /// Moves what is pending on every bridge in both directions, in hash
     /// order. A failing bridge does not stop the others, the number of
     /// failures are returned in the error.
-    pub(super) fn propagate(&mut self, own_node: &UniqueNodeId) -> Result<(), PropagateError> {
+    pub(super) fn propagate(
+        &mut self,
+        node: &Node<B::Service>,
+        notify: bool,
+    ) -> Result<(), PropagateError> {
         let mut failures = 0;
         for bridge in self.bridges.values_mut() {
-            bridge.failure = bridge.bridged.propagate(own_node).err();
+            bridge.failure = bridge.bridged.propagate(node, notify).err();
             failures += usize::from(bridge.failure.is_some());
         }
         match failures {
@@ -158,7 +161,7 @@ impl<B: Bridged> BridgeTable<B> {
             if outbound != 0 || inbound != 0 {
                 trace!(
                     from origin,
-                    "{:?} bridge of {} moved {} out, {} in",
+                    "Relayed {:?} bridge of \"{}\" ({} out, {} in)",
                     bridge.pattern, bridge.name, outbound, inbound
                 );
             }

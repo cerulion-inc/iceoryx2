@@ -12,43 +12,48 @@
 
 use core::error::Error;
 
-use crate::{Destination, ResizeError};
+use crate::{SampleBytes, SampleBytesRef, SampleBytesRefMut, SampleLengths};
 
-/// Why a take ended without a message written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TakeError<Failure> {
-    /// The destination refused the message, which is dropped.
-    Rejected(ResizeError),
-    /// The endpoints failed.
-    Failed(Failure),
+/// Where a taken sample's bytes are written.
+pub trait TakeDestination<'a> {
+    /// The locations for a sample of `lengths`.
+    ///
+    /// Returns `None` if the destination cannot honor the requested lengths.
+    fn for_lengths(self, lengths: SampleLengths) -> Option<SampleBytesRefMut<'a>>;
 }
 
-impl<Failure: core::fmt::Display> core::fmt::Display for TakeError<Failure> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Rejected(refusal) => write!(f, "TakeError::Rejected({refusal})"),
-            Self::Failed(error) => write!(f, "TakeError::Failed({error})"),
-        }
+impl<'a> TakeDestination<'a> for &'a mut SampleBytes {
+    fn for_lengths(self, lengths: SampleLengths) -> Option<SampleBytesRefMut<'a>> {
+        self.header.resize(lengths.header, 0);
+        self.payload.resize(lengths.payload, 0);
+        Some(self.as_mut())
     }
 }
 
-impl<Failure: Error> Error for TakeError<Failure> {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeOutcome {
+    /// The sample was written into the destination.
+    Taken,
+    /// The destination declined the sample.
+    Declined,
+    /// A sample was taken and dropped as one not meant for the link. More
+    /// may be pending.
+    Skipped,
+    /// Nothing was pending.
+    Empty,
+}
 
 /// The gateway's publisher and subscription on the middleware.
 pub trait PublishSubscribeEndpoints {
     type Failure: Error;
 
-    /// Publishes a message, `header` in the middleware's header form and
-    /// `payload` in its wire form.
-    fn publish(&mut self, header: &[u8], payload: &[u8]) -> Result<(), Self::Failure>;
+    /// Publishes the bytes of a sample, provided in its wire form.
+    fn publish(&mut self, sample: SampleBytesRef<'_>) -> Result<(), Self::Failure>;
 
-    /// Takes the pending message if any, into `into`.
-    ///
-    /// The payload is written in the wire form and the header as the
-    /// middleware's header form.
-    ///
-    /// Returns whether a message was taken.
-    /// A message `into` refuses is taken and dropped, and the refusal
-    /// returned.
-    fn take<D: Destination>(&mut self, into: &mut D) -> Result<bool, TakeError<Self::Failure>>;
+    /// Takes the pending sample, if any, in the middleware's wire form into
+    /// the locations `destination` provides for its lengths.
+    fn take<'a>(
+        &mut self,
+        destination: impl TakeDestination<'a>,
+    ) -> Result<TakeOutcome, Self::Failure>;
 }

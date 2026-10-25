@@ -13,6 +13,7 @@
 use alloc::collections::BTreeSet;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -34,10 +35,10 @@ use iceoryx2_bb_posix::adaptive_wait::AdaptiveWaitBuilder;
 use iceoryx2_link::Link;
 
 use crate::parameters::{PayloadShape, PublishSubscribeService};
-use iceoryx2_link_adapter::{Destination, Region, ResizeError};
+use iceoryx2_link_adapter::{LoanError, LoanableSample, SampleBytes};
 use iceoryx2_link_backend::service_description::{
-    PublishSubscribeSettings, PublishSubscribeTypes, ServiceDescription, ServiceDescriptor,
-    ServiceTypes, TypeDescription,
+    PublishSubscribeSettings, SampleTypes, ServiceDescription, ServiceDescriptor, ServiceTypes,
+    TypeDescription,
 };
 use iceoryx2_link_backend::{Backend, WakeHandle, WakeService};
 
@@ -81,7 +82,7 @@ pub fn describe<S: Service, Payload: PayloadShape, Header: TypeName>(
     ServiceDescription::compose_publish_subscribe::<S>(
         *name,
         PublishSubscribeSettings::from_config(config),
-        PublishSubscribeTypes {
+        SampleTypes {
             payload: TypeDescription::from(&Payload::type_detail()),
             user_header: TypeDescription::from(&TypeDetail::new::<Header>(TypeVariant::FixedSize)),
         },
@@ -110,7 +111,7 @@ pub fn descriptor(name: &str, payload: &str) -> ServiceDescriptor {
 /// The types of a publish-subscribe service with `payload` as its
 /// payload type and no user header.
 pub fn types_of(payload: &str) -> ServiceTypes {
-    ServiceTypes::PublishSubscribe(PublishSubscribeTypes {
+    ServiceTypes::PublishSubscribe(SampleTypes {
         payload: TypeDescription {
             variant: TypeVariant::FixedSize,
             type_name: String::from(payload),
@@ -119,6 +120,15 @@ pub fn types_of(payload: &str) -> ServiceTypes {
         },
         user_header: TypeDescription::from(&TypeDetail::new::<()>(TypeVariant::FixedSize)),
     })
+}
+
+/// A descriptor of the event service `name`.
+pub fn event_descriptor(name: &str) -> ServiceDescriptor {
+    ServiceDescriptor {
+        name: ServiceName::new(name).expect("valid service name"),
+        hash: hash(name),
+        types: ServiceTypes::Event,
+    }
 }
 
 /// A link filter rejecting only the service `name`, and whether it has
@@ -146,10 +156,11 @@ pub struct Side<S: Service, B: Backend<S>> {
     pub link: Link<S, B>,
 }
 
-/// A fresh side, its link over the backend `backend` builds for its
-/// configuration.
-pub fn side<S: Service, B: Backend<S>>(backend: impl FnOnce(&Config) -> B) -> Side<S, B> {
-    let config = generate_isolated_config();
+/// Creates one side of a link using the provided config.
+pub fn side<S: Service, B: Backend<S>>(
+    config: Config,
+    backend: impl FnOnce(&Config) -> B,
+) -> Side<S, B> {
     let node = NodeBuilder::new()
         .config(&config)
         .create::<S>()
@@ -266,20 +277,32 @@ impl Default for WakeSource {
     }
 }
 
-/// A taken message held in memory, a destination for what endpoints
-/// writes.
-#[derive(Debug, Default)]
-pub struct Taken {
-    pub header: Vec<u8>,
-    pub payload: Vec<u8>,
+/// A stand-in for an unloaned sample that loans heap buffers instead of
+/// shared memory, so a writer can be tested without a port.
+pub struct UnloanedBuffers {
+    pub header_size: usize,
 }
 
-impl Destination for Taken {
-    fn payload(&mut self, len: usize) -> Result<&mut [u8], ResizeError> {
-        self.payload.for_length(len)
-    }
+impl LoanableSample for UnloanedBuffers {
+    type WritableSample = SampleBytes;
+    type InitializedSample = SampleBytes;
 
-    fn header(&mut self, len: usize) -> Result<&mut [u8], ResizeError> {
-        self.header.for_length(len)
+    fn loan(self, payload_len: usize) -> Result<Self::WritableSample, LoanError> {
+        Ok(SampleBytes {
+            header: vec![0; self.header_size],
+            payload: vec![0; payload_len],
+        })
+    }
+}
+
+/// Mocks a loan that is refused.
+pub struct NotLoanable;
+
+impl LoanableSample for NotLoanable {
+    type WritableSample = SampleBytes;
+    type InitializedSample = SampleBytes;
+
+    fn loan(self, _: usize) -> Result<Self::WritableSample, LoanError> {
+        Err(LoanError::Malformed)
     }
 }

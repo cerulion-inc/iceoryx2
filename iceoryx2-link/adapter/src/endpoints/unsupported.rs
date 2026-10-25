@@ -13,8 +13,8 @@
 use iceoryx2::port::event_id::EventId;
 use iceoryx2_link_backend::Never;
 
-use super::{EventEndpoints, PublishSubscribeEndpoints, TakeError};
-use crate::Destination;
+use super::{EventEndpoints, PublishSubscribeEndpoints, TakeDestination, TakeOutcome};
+use crate::SampleBytesRef;
 
 /// The endpoints of a pattern the middleware does not have.
 pub struct UnsupportedEndpoints(Never);
@@ -22,11 +22,11 @@ pub struct UnsupportedEndpoints(Never);
 impl PublishSubscribeEndpoints for UnsupportedEndpoints {
     type Failure = core::convert::Infallible;
 
-    fn publish(&mut self, _: &[u8], _: &[u8]) -> Result<(), Self::Failure> {
+    fn publish(&mut self, _: SampleBytesRef<'_>) -> Result<(), Self::Failure> {
         match self.0 {}
     }
 
-    fn take<D: Destination>(&mut self, _: &mut D) -> Result<bool, TakeError<Self::Failure>> {
+    fn take<'a>(&mut self, _: impl TakeDestination<'a>) -> Result<TakeOutcome, Self::Failure> {
         match self.0 {}
     }
 }
