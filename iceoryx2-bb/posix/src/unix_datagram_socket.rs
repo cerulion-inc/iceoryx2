@@ -514,6 +514,12 @@ impl UnixDatagramSocket {
             )
         } == 0
         {
+            // Windows emulates unix datagram sockets over UDP and creates no
+            // file at the socket path, so there is nothing to chmod. Its
+            // `umask` is a no-op too, so this keeps the behavior from before.
+            #[cfg(target_os = "windows")]
+            let _ = permission;
+            #[cfg(not(target_os = "windows"))]
             if unsafe { posix::chmod(self.name.as_c_str(), permission.bits()) } != 0 {
                 let msg = "Failed to set the socket permission after bind";
                 handle_errno!(UnixDatagramReceiverCreationError, from self,
