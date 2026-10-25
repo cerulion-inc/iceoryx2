@@ -18,6 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iceoryx2_pal_posix::posix::{shm_list, shm_open, shm_unlink};
 
+const SENTINEL: &str = "sentinel-shm-object";
+
 fn last_errno() -> i32 {
     io::Error::last_os_error()
         .raw_os_error()
@@ -35,6 +37,10 @@ fn a_directory_with_a_parent_component_is_refused() {
         std::process::id()
     ));
     std::fs::create_dir(&root).expect("create test root");
+    // `selected/..` names `root`. A sentinel entry there makes the empty
+    // `shm_list()` below prove that the directory was refused, not merely
+    // that it was empty.
+    std::fs::write(root.join(SENTINEL), b"").expect("create sentinel in test root");
 
     // SAFETY: this is the binary's only test and sets the variable before shared-memory access.
     unsafe { std::env::set_var("CERULION_SHM_DIR", root.join("selected").join("..")) };
@@ -57,13 +63,16 @@ fn a_directory_with_a_parent_component_is_refused() {
     assert_eq!(last_errno(), libc::EINVAL);
     // SAFETY: shm_list reads the configured directory and returns owned name buffers.
     assert!(unsafe { shm_list() }.is_empty());
-    assert!(
-        std::fs::read_dir(&root)
-            .expect("read test root")
-            .next()
-            .is_none(),
+    let entries: Vec<_> = std::fs::read_dir(&root)
+        .expect("read test root")
+        .map(|entry| entry.expect("read test root entry").file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        [SENTINEL],
         "nothing is created for a refused directory"
     );
 
+    std::fs::remove_file(root.join(SENTINEL)).expect("remove sentinel from test root");
     std::fs::remove_dir(&root).expect("remove test root");
 }

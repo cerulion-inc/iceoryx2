@@ -19,6 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iceoryx2_pal_posix::posix::{shm_list, shm_open, shm_unlink};
 
+const SENTINEL: &str = "sentinel-shm-object";
+
 fn last_errno() -> i32 {
     io::Error::last_os_error()
         .raw_os_error()
@@ -41,6 +43,9 @@ fn a_trailing_dot_does_not_let_a_symlinked_directory_through() {
     std::fs::create_dir(&target).expect("create symlink target");
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700))
         .expect("set target mode");
+    // A sentinel entry makes the empty `shm_list()` below prove that the
+    // symlink was not followed, not merely that its target was empty.
+    std::fs::write(target.join(SENTINEL), b"").expect("create sentinel in symlink target");
     symlink(&target, &link).expect("create directory symlink");
 
     // SAFETY: this is the binary's only test and sets the variable before shared-memory access.
@@ -64,14 +69,17 @@ fn a_trailing_dot_does_not_let_a_symlinked_directory_through() {
     assert_eq!(last_errno(), libc::ENOTDIR);
     // SAFETY: shm_list reads the configured directory and returns owned name buffers.
     assert!(unsafe { shm_list() }.is_empty());
-    assert!(
-        std::fs::read_dir(&target)
-            .expect("read symlink target")
-            .next()
-            .is_none(),
+    let entries: Vec<_> = std::fs::read_dir(&target)
+        .expect("read symlink target")
+        .map(|entry| entry.expect("read symlink target entry").file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        [SENTINEL],
         "no object is created through the symlink"
     );
 
+    std::fs::remove_file(target.join(SENTINEL)).expect("remove sentinel from symlink target");
     std::fs::remove_file(&link).expect("remove directory symlink");
     std::fs::remove_dir(&target).expect("remove symlink target");
     std::fs::remove_dir(&root).expect("remove test root");
