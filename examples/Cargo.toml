@@ -292,3 +292,21 @@ path = "rust/service_variant_customization/subscriber.rs"
 [[example]]
 name = "service_variant_customization_publisher"
 path = "rust/service_variant_customization/publisher.rs"
+
+# simulation clock
+
+[[example]]
+name = "simulation_clock_monitor"
+path = "rust/simulation_clock/monitor.rs"
+
+[[example]]
+name = "simulation_clock_receiver"
+path = "rust/simulation_clock/receiver.rs"
+
+[[example]]
+name = "simulation_clock_sender"
+path = "rust/simulation_clock/sender.rs"
+
+[[example]]
+name = "simulation_clock_time_controller"
+path = "rust/simulation_clock/time_controller.rs"

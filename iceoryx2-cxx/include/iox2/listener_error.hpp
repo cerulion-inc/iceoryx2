@@ -45,6 +45,10 @@ enum class ListenerWaitError : uint8_t {
     /// Errors that indicate either an implementation issue or a wrongly
     /// configured system.
     InternalFailure,
+    /// The capacity of the clock scheduler is exceeded.
+    ClockScheduleCapacityExceeded,
+    /// A notifier could not be created or the notification failed.
+    NotificationError,
 };
 
 } // namespace iox2

@@ -468,7 +468,7 @@ impl<
         let origin = "Client::new()";
         let service = &client_factory.factory.service;
         let client_id = fail!(from origin,
-            when UniqueClientId::new::<Service>(client_factory.config.port_name, service.shared_node().config()),
+            when UniqueClientId::new::<Service>(client_factory.config.port_name, service.shared_node().id_generator()),
             with ClientCreateError::UnableToGenerateUniqueClientId, "{msg} since the UniqueClientId could not be generated.");
 
         // !MUST! be the first thing that is created when a new port is instantiated otherwise the
@@ -566,8 +566,9 @@ impl<
             segment_states: {
                 let mut v =
                     alloc::vec::Vec::<SegmentState>::with_capacity(max_number_of_segments as usize);
-                for _ in 0..max_number_of_segments {
-                    v.push(SegmentState::new(number_of_requests))
+                v.push(SegmentState::new(number_of_requests));
+                for _ in 1..max_number_of_segments {
+                    v.push(SegmentState::new_unallocated(number_of_requests))
                 }
                 v
             },
@@ -709,6 +710,8 @@ impl<
 
     fn next_request_id(&self) -> RequestId {
         RequestId::new(
+            // TODO iox2-#809: Replace with `try_update` once MSRV is set to 1.95.0
+            #[allow(deprecated)]
             self.request_id_counter
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                     Some((v + 1) % RequestId::max_value())

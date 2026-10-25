@@ -12,11 +12,16 @@
 
 use crate::{
     dynamic_storage,
-    event::trigger::{
-        State,
-        semaphore::{GenericSemaphoreTrigger, SemaphoreMgmt},
-        socket_pair::GenericSocketPairTrigger,
-        unix_datagram_socket::GenericUnixDatagramSocketTrigger,
+    event::{
+        common::EventImpl,
+        trigger::{
+            State,
+            named_pipe::GenericNamedPipeTrigger,
+            semaphore::{GenericSemaphoreTrigger, SemaphoreMgmt},
+            socket_pair::GenericSocketPairTrigger,
+            stub::{Stub, StubMgmt},
+            unix_datagram_socket::GenericUnixDatagramSocketTrigger,
+        },
     },
 };
 use iceoryx2_bb_lock_free::mpmc::{
@@ -44,4 +49,25 @@ pub type SemaphoreShmBitSet = GenericSemaphoreTrigger<
 pub type SemaphoreShmCountingBitSet = GenericSemaphoreTrigger<
     RelocatableCountingBitSet,
     dynamic_storage::posix_shared_memory::Storage<State<RelocatableCountingBitSet, SemaphoreMgmt>>,
+>;
+
+#[doc(hidden)]
+pub type InternalStubEvent = EventImpl<
+    crate::event::event_state::bit_set::RelocatableBitSet,
+    StubMgmt,
+    dynamic_storage::process_local::Storage<
+        State<crate::event::event_state::bit_set::RelocatableBitSet, StubMgmt>,
+    >,
+    Stub,
+    Stub,
+>;
+
+pub type NamedPipeBitSet = GenericNamedPipeTrigger<
+    RelocatableBitSet,
+    dynamic_storage::posix_shared_memory::Storage<State<RelocatableBitSet, ()>>,
+>;
+
+pub type NamedPipeCountingBitSet = GenericNamedPipeTrigger<
+    RelocatableCountingBitSet,
+    dynamic_storage::posix_shared_memory::Storage<State<RelocatableCountingBitSet, ()>>,
 >;

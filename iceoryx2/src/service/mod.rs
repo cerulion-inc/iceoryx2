@@ -250,6 +250,11 @@ pub mod ipc;
 /// [`Send`] but at the cost of an additional internal mutex.
 pub mod ipc_threadsafe;
 
+/// A ipc configuration with a simulated clock that the user can explicitly acquire with
+/// [`Node::time_controller()`](crate::node::Node::time_controller()) and advance with
+/// [`TimeController::advance()`](iceoryx2_cal::clock::TimeController::advance()).
+pub mod ipc_simulated_clock;
+
 /// Contains marker types to enable additional API features.
 pub mod marker;
 
@@ -271,15 +276,17 @@ use alloc::vec::Vec;
 use iceoryx2_bb_elementary::package_version::PackageVersion;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
-use iceoryx2_bb_lock_free::mpmc::counting_bit_set::RelocatableCountingBitSet;
 use iceoryx2_bb_posix::file::AccessMode;
+use iceoryx2_cal::clock::Clock;
 
 use crate::config;
+use crate::name_generator::NameGenerator;
 use crate::service::config_scheme::dynamic_config_storage_config;
 use crate::service::dynamic_config::DynamicConfig;
 use crate::service::naming_scheme::dynamic_config_name;
 use crate::service::naming_scheme::static_config_name;
 use crate::service::resource::ServiceResource;
+use crate::service::resource::type_definition::TypeDefinition;
 use crate::service::static_config::*;
 use crate::{
     identifiers::{UniqueNodeId, UniquePortId, UniqueServiceId},
@@ -937,7 +944,9 @@ pub mod internal {
 /// Contains the building blocks a [`Service`] requires to create the underlying resources and
 /// establish communication.
 #[allow(private_bounds)]
-pub trait Service: Debug + Sized + internal::ServiceInternal<Self> + Clone + Send + Sync {
+pub trait Service:
+    Debug + Sized + internal::ServiceInternal<Self> + Clone + Send + Sync + 'static
+{
     /// Every service name will be hashed, to allow arbitrary [`ServiceName`]s with as less
     /// restrictions as possible. The hash of the [`ServiceName`] is the [`Service`]s uuid.
     type ServiceNameHasher: Hash;
@@ -971,7 +980,11 @@ pub trait Service: Debug + Sized + internal::ServiceInternal<Self> + Clone + Sen
     type Connection: ZeroCopyConnection;
 
     /// The mechanism used to signal events between endpoints.
-    type Event: Event<RelocatableCountingBitSet>;
+    type Event: Event;
+
+    /// The clock concept used for all time related calls like, acquiring the current time or sleep
+    /// for a specified time.
+    type Clock: Clock<Self::Event>;
 
     /// Monitoring mechanism to detect dead processes.
     type Monitoring: Monitoring;
@@ -995,6 +1008,10 @@ pub trait Service: Debug + Sized + internal::ServiceInternal<Self> + Clone + Sen
 
     /// Mechanism to generate IDs that are unique, at least within a single process.
     type UniqueId: UniqueIdGenerator;
+
+    /// Mechanism to generate [`NodeName`](crate::node::node_name::NodeName)s and
+    /// [`PortName`](crate::port::port_name::PortName)s.
+    type NameGenerator: NameGenerator;
 
     /// Checks if a service under a given [`config::Config`] does exist
     ///
@@ -1102,6 +1119,70 @@ pub trait Service: Debug + Sized + internal::ServiceInternal<Self> + Clone + Sen
 
         Ok(())
     }
+}
+
+#[doc(hidden)]
+pub fn __internal_payload_type_definition<S: Service>(
+    config: &config::Config,
+    static_config: &StaticConfig,
+) -> Result<Option<Vec<u8>>, ServiceDetailsError> {
+    type_definition_of::<S>(
+        config,
+        static_config,
+        &static_config
+            .publish_subscribe()
+            .message_type_details()
+            .payload,
+        &resource::publish_subscribe::PAYLOAD_TYPE_DEFINITION,
+    )
+}
+
+#[doc(hidden)]
+pub fn __internal_request_type_definition<S: Service>(
+    config: &config::Config,
+    static_config: &StaticConfig,
+) -> Result<Option<Vec<u8>>, ServiceDetailsError> {
+    type_definition_of::<S>(
+        config,
+        static_config,
+        &static_config
+            .request_response()
+            .request_message_type_details()
+            .payload,
+        &resource::request_response::REQUEST_TYPE_DEFINITION,
+    )
+}
+
+#[doc(hidden)]
+pub fn __internal_response_type_definition<S: Service>(
+    config: &config::Config,
+    static_config: &StaticConfig,
+) -> Result<Option<Vec<u8>>, ServiceDetailsError> {
+    type_definition_of::<S>(
+        config,
+        static_config,
+        &static_config
+            .request_response()
+            .response_message_type_details()
+            .payload,
+        &resource::request_response::RESPONSE_TYPE_DEFINITION,
+    )
+}
+
+fn type_definition_of<S: Service>(
+    config: &config::Config,
+    static_config: &StaticConfig,
+    payload: &message_type_details::TypeDetail,
+    name: &iceoryx2_bb_system_types::file_name::FileName,
+) -> Result<Option<Vec<u8>>, ServiceDetailsError> {
+    use iceoryx2_bb_container::string::String;
+    use iceoryx2_bb_elementary_traits::type_name::TypeName;
+
+    if payload.type_name().as_str() != unsafe { marker::Flatbuffer::<()>::type_name() } {
+        return Ok(None);
+    }
+    let bytes = TypeDefinition::read_storage::<S>(name, config, static_config)?;
+    Ok(Some(bytes))
 }
 
 #[doc(hidden)]

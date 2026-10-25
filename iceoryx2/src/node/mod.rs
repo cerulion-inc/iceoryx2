@@ -132,6 +132,11 @@
 //!         }
 //!         Err(NodeWaitFailure::Interrupt) => {
 //!             println!("Someone send an interrupt signal ...");
+//!             break;
+//!         }
+//!         Err(e) => {
+//!             println!("Failure while waiting. [{e:?}]");
+//!             break;
 //!         }
 //!     }
 //! }
@@ -167,7 +172,6 @@ use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use iceoryx2_bb_posix::adaptive_wait::{AdaptiveWaitBuilder, AdaptiveWaitStrategy};
 use iceoryx2_bb_posix::clock::Time;
-use iceoryx2_bb_posix::clock::{NanosleepError, nanosleep};
 use iceoryx2_bb_posix::mutex::Handle;
 use iceoryx2_bb_posix::mutex::Mutex;
 use iceoryx2_bb_posix::mutex::MutexBuilder;
@@ -176,9 +180,21 @@ use iceoryx2_bb_posix::mutex::MutexType;
 use iceoryx2_bb_posix::process::Process;
 use iceoryx2_bb_posix::process::ProcessId;
 use iceoryx2_bb_posix::signal::SignalHandler;
+use iceoryx2_bb_si_units::TimePoint;
 use iceoryx2_bb_system_types::file_name::FileName;
 use iceoryx2_cal::bag::BagFamily;
 use iceoryx2_cal::bag::BagHandleFamily;
+use iceoryx2_cal::clock::ClockBlockingSleepError;
+use iceoryx2_cal::clock::ClockListenerSchedule;
+use iceoryx2_cal::clock::ClockListenerScheduleError;
+use iceoryx2_cal::clock::ClockNow;
+use iceoryx2_cal::clock::ClockNowError;
+use iceoryx2_cal::clock::ClockReactorSchedule;
+use iceoryx2_cal::clock::ClockReactorScheduleError;
+use iceoryx2_cal::clock::TimeControllerBuilder;
+use iceoryx2_cal::clock::TimeControllerBuilderOpenOrCreateError;
+use iceoryx2_cal::clock::Timeout;
+use iceoryx2_cal::clock::{Clock, ClockBuilder};
 use iceoryx2_cal::named_concept::{NamedConceptPathHintRemoveError, NamedConceptRemoveError};
 use iceoryx2_cal::{
     monitoring::*, named_concept::NamedConceptListError, serialize::*, static_storage::*,
@@ -186,10 +202,13 @@ use iceoryx2_cal::{
 use iceoryx2_log::{debug, fail, fatal_panic, trace, warn};
 
 use crate::identifiers::UniqueNodeId;
+use crate::name_generator::*;
 use crate::node::node_name::NodeName;
 use crate::prelude::MessagingPattern;
 use crate::service::ServiceRemoveError;
 use crate::service::builder::{Builder, OpenDynamicStorageFailure};
+use crate::service::config_scheme::clock_config;
+use crate::service::config_scheme::event_config;
 use crate::service::config_scheme::port_tag_config;
 use crate::service::config_scheme::{
     node_details_path, node_monitoring_config, service_tag_config,
@@ -201,7 +220,10 @@ use crate::service::stale_resource_cleanup::remove_stale_port_resources;
 use crate::service::{self, ServiceRemoveNodeError};
 use crate::signal_handling_mode::SignalHandlingMode;
 use crate::unique_id_generator::*;
+use crate::waitset::WaitSetBuilder;
 use crate::{config::Config, service::config_scheme::node_details_config};
+
+const CLOCK_NAME: FileName = unsafe { FileName::new_unchecked_const(b"iceoryx2") };
 
 impl UniqueNodeId {
     pub(crate) fn as_file_name(&self) -> FileName {
@@ -221,6 +243,12 @@ pub enum NodeCreationFailure {
     SystemCorrupted,
     /// The [`UniqueNodeId`] could not be generated.
     UnableToGenerateUniqueNodeId,
+    /// The [`NameGenerator`] could not be opened/created.
+    UnableToOpenOrCreateNameGenerator,
+    /// The [`Clock`] used for all time related operations could not be opened.
+    FailedToOpenClock,
+    /// A [`Signal`](iceoryx2_bb_posix::signal::Signal) was raised while creating the [`Node`]
+    InterruptedBySignal,
 }
 
 impl core::fmt::Display for NodeCreationFailure {
@@ -238,6 +266,8 @@ pub enum NodeWaitFailure {
     Interrupt,
     /// A termination signal `SIGTERM` was received.
     TerminationRequest,
+    /// Errors that indicate either an implementation issue or a wrongly configured system.
+    InternalError,
 }
 
 impl core::fmt::Display for NodeWaitFailure {
@@ -754,7 +784,7 @@ impl<Service: service::Service> DeadNodeView<Service> {
                 fail!(from self, with NodeCleanupFailure::ResourcesAlreadyCleanedUp,
                     "{} since another instance has already cleaned up all resources.", msg);
             }
-            Err(MonitoringCreateCleanerError::Interrupt) => {
+            Err(MonitoringCreateCleanerError::InterruptedBySignal) => {
                 fail!(from self, with NodeCleanupFailure::Interrupt,
                     "{} since an interrupt signal was received.", msg);
             }
@@ -951,13 +981,43 @@ impl<BagHandle: BagHandleFamily> RegisteredServices<BagHandle> {
 
 #[derive(Debug)]
 struct SharedNodeState<Service: service::Service> {
+    name_generator: Service::NameGenerator,
+    id_generator: Service::UniqueId,
     id: UniqueNodeId,
     details: NodeDetails,
     monitoring_token: UnsafeCell<Option<<Service::Monitoring as Monitoring>::Token>>,
     registered_services: RegisteredServices<<Service::Bag as BagFamily>::BagHandle>,
     signal_handling_mode: SignalHandlingMode,
     details_storage: Service::StaticStorage,
+    clock: Service::Clock,
 }
+
+impl<Service: service::Service> ClockNow for SharedNodeState<Service> {
+    fn now(&self) -> Result<iceoryx2_bb_si_units::TimePoint, iceoryx2_cal::clock::ClockNowError> {
+        self.clock.now()
+    }
+}
+
+impl<Service: service::Service> ClockListenerSchedule for SharedNodeState<Service> {
+    fn schedule_on<'a>(
+        &'a self,
+        timeout: iceoryx2_cal::clock::Timeout,
+        listener_name: &FileName,
+    ) -> Result<iceoryx2_cal::clock::ScheduleOnHandle<'a>, ClockListenerScheduleError> {
+        self.clock.schedule_on(timeout, listener_name)
+    }
+}
+
+impl<Service: service::Service> ClockReactorSchedule for SharedNodeState<Service> {
+    fn schedule<'a>(
+        &'a self,
+        timeout: iceoryx2_cal::clock::Timeout,
+    ) -> Result<iceoryx2_cal::clock::ScheduleHandle<'a>, ClockReactorScheduleError> {
+        self.clock.schedule(timeout)
+    }
+}
+
+impl<Service: service::Service> NodeClock for SharedNodeState<Service> {}
 
 unsafe impl<Service: service::Service> Send for SharedNodeState<Service> {}
 unsafe impl<Service: service::Service> Sync for SharedNodeState<Service> {}
@@ -977,6 +1037,10 @@ impl<Service: service::Service> Abandonable for SharedNodeState<Service> {
                 )
             };
         }
+
+        unsafe {
+            <Service::Clock as Abandonable>::abandon_in_place(NonNull::from_mut(&mut this.clock))
+        };
     }
 }
 
@@ -1052,9 +1116,19 @@ impl<Service: service::Service> Abandonable for SharedNode<Service> {
     }
 }
 
+pub(crate) trait NodeClock: ClockListenerSchedule + ClockReactorSchedule {}
+
 impl<Service: service::Service> SharedNode<Service> {
+    pub(crate) fn clock(&self) -> Arc<dyn NodeClock> {
+        self.state.clone()
+    }
+
     pub(crate) fn config(&self) -> &Config {
         &self.state.details.config
+    }
+
+    pub(crate) fn id_generator(&self) -> &Service::UniqueId {
+        &self.state.id_generator
     }
 
     pub(crate) fn id(&self) -> &UniqueNodeId {
@@ -1065,6 +1139,10 @@ impl<Service: service::Service> SharedNode<Service> {
         &self,
     ) -> &RegisteredServices<<Service::Bag as BagFamily>::BagHandle> {
         &self.state.registered_services
+    }
+
+    pub(crate) fn name_generator(&self) -> &Service::NameGenerator {
+        &self.state.name_generator
     }
 
     pub(crate) fn name(&self) -> &NodeName {
@@ -1139,6 +1217,34 @@ impl<Service: service::Service> Abandonable for Node<Service> {
     }
 }
 
+/// Defines the underlying [`TimeController`](iceoryx2_cal::clock::TimeController) type used to manually
+/// advance the [`Clock`].
+#[allow(type_alias_bounds)] // Introduce bounds for completeness
+pub type TimeController<Service>
+where
+    Service: service::Service,
+    <<Service as service::Service>::Clock as Clock<<Service as service::Service>::Event>>::Builder: TimeControllerBuilder,
+= <<<Service as service::Service>::Clock as Clock<<Service as service::Service>::Event>>::Builder as TimeControllerBuilder>::TimeController;
+
+impl<Service: service::Service> Node<Service>
+where
+    <Service::Clock as Clock<Service::Event>>::Builder: TimeControllerBuilder,
+{
+    /// Returns the underlying [`TimeController`](iceoryx2_cal::clock::TimeController) that allows
+    /// the user to manually advance the [`Clock`]. At most one [`Node`] in the iceoryx2 domain is
+    /// allowed to hold the [`TimeController`](iceoryx2_cal::clock::TimeController)
+    pub fn time_controller(
+        &self,
+    ) -> Result<TimeController<Service>, TimeControllerBuilderOpenOrCreateError> {
+        let event_config = event_config::<Service>(self.shared.config());
+        let clock_config = clock_config::<Service>(self.shared.config());
+        <Service::Clock as Clock<Service::Event>>::Builder::new(&CLOCK_NAME)
+            .config(&clock_config)
+            .event_config(&event_config)
+            .open_or_create_time_controller()
+    }
+}
+
 impl<Service: service::Service> Node<Service> {
     /// Returns the [`NodeName`].
     pub fn name(&self) -> &NodeName {
@@ -1158,6 +1264,12 @@ impl<Service: service::Service> Node<Service> {
     /// Instantiates a [`ServiceBuilder`](Builder) for a service with the provided name.
     pub fn service_builder(&self, name: &ServiceName) -> Builder<Service> {
         Builder::new(name, self.shared.clone())
+    }
+
+    /// Instantiates a [`WaitSetBuilder`] to construct a new [`WaitSet`](crate::waitset::WaitSet),
+    /// iceoryx2 event multiplexer.
+    pub fn waitset_builder(&self) -> WaitSetBuilder<Service> {
+        WaitSetBuilder::new(self.shared.clock())
     }
 
     /// Returns the [`NodeState`] of a specific [`Node`] that has the provided [`UniqueNodeId`].
@@ -1248,26 +1360,35 @@ impl<Service: service::Service> Node<Service> {
         Ok(())
     }
 
+    /// Returns the current time.
+    pub fn now(&self) -> Result<TimePoint, ClockNowError> {
+        self.shared.state.clock.now()
+    }
+
     /// Waits until the cycle time has passed. It returns [`NodeWaitFailure::TerminationRequest`]
     /// when a `SIGTERM` signal was received or [`NodeWaitFailure::Interrupt`] when a `SIGINT`
     /// signal was received.
     pub fn wait(&self, cycle_time: Duration) -> Result<(), NodeWaitFailure> {
-        let msg = "Unable to wait on node";
+        let msg = "Unable to wait on node with cycle time";
         self.handle_termination_request(msg)?;
 
-        match nanosleep(cycle_time) {
+        match self
+            .shared
+            .state
+            .clock
+            .blocking_sleep(Timeout::By(cycle_time))
+        {
             Ok(()) => {
                 self.handle_termination_request(msg)?;
                 Ok(())
             }
-            Err(NanosleepError::InterruptedBySignal(_)) => {
+            Err(ClockBlockingSleepError::InterruptedBySignal) => {
                 fail!(from self, with NodeWaitFailure::Interrupt,
-                        "{msg} since a interrupt signal was received.");
+                        "{msg} {cycle_time:?} since an interrupt signal was received.");
             }
             Err(v) => {
-                fatal_panic!(from self,
-                    "Failed to wait with cycle time {:?} in main event look, caused by ({:?}).",
-                    cycle_time, v);
+                fail!(from self, with NodeWaitFailure::InternalError,
+                    "{msg} {cycle_time:?} in main event loop, caused by ({v:?}).");
             }
         }
     }
@@ -1356,7 +1477,7 @@ impl<Service: service::Service> Node<Service> {
                 fail!(from origin, with NodeListFailure::InsufficientPermissions,
                     "{} due to insufficient permissions to acquire the nodes state.", msg);
             }
-            MonitoringStateError::Interrupt => {
+            MonitoringStateError::InterruptedBySignal => {
                 fail!(from origin, with NodeListFailure::Interrupt,
                     "{} due to an interrupt signal while acquiring the nodes state.", msg);
             }
@@ -1384,7 +1505,7 @@ impl<Service: service::Service> Node<Service> {
                 fail!(from origin, with NodeListFailure::InsufficientPermissions,
                         "{} due to insufficient permissions while acquiring the node state.", msg);
             }
-            MonitoringCreateMonitorError::Interrupt => {
+            MonitoringCreateMonitorError::InterruptedBySignal => {
                 fail!(from origin, with NodeListFailure::Interrupt,
                         "{} since an interrupt was received while acquiring the node state.", msg);
             }
@@ -1593,13 +1714,34 @@ impl NodeBuilder {
             .as_ref()
             .unwrap_or_else(|| Config::global_config());
 
+        let name_generator = fail!(from self, when Service::NameGenerator::open_or_create(config),
+            with NodeCreationFailure::UnableToOpenOrCreateNameGenerator,
+            "{msg} because the name generator could not be opened/created.");
         let name = match &self.name {
             Some(n) => n.clone(),
-            None => NodeName::default(),
+            None => name_generator.generate_node_name(),
         };
-        let node_id = fail!(from self, when UniqueNodeId::new::<Service>(name, config),
+
+        let id_generator = fail!(from self, when Service::UniqueId::open_or_create::<Service>(config),
+            with NodeCreationFailure::UnableToGenerateUniqueNodeId,
+            "{msg} since the unique id generator could not be opened.");
+        let node_id = fail!(from self, when UniqueNodeId::new::<Service>(name, &id_generator),
             with NodeCreationFailure::UnableToGenerateUniqueNodeId,
             "{msg} since the UniqueNodeId could not be generated.");
+
+        let event_config = event_config::<Service>(config);
+        let clock_config = clock_config::<Service>(config);
+        let clock = match <Service::Clock as Clock<Service::Event>>::Builder::new(&CLOCK_NAME)
+            .config(&clock_config)
+            .event_config(&event_config)
+            .open_clock()
+        {
+            Ok(clock) => clock,
+            Err(e) => {
+                fail!(from self, with NodeCreationFailure::FailedToOpenClock,
+                    "{msg} since the clock could not be opened. [{e:?}]");
+            }
+        };
 
         let monitor_name = fatal_panic!(from self, when FileName::new(node_id.value().to_string().as_bytes()),
                                 "This should never happen! {msg} since the UniqueNodeId is not a valid file name.");
@@ -1608,12 +1750,15 @@ impl NodeBuilder {
         let monitoring_token = self.create_token::<Service>(config, &monitor_name)?;
 
         let state = Arc::new(SharedNodeState {
+            name_generator,
+            id_generator,
             id: node_id,
             monitoring_token: UnsafeCell::new(Some(monitoring_token)),
             registered_services: RegisteredServices::new(),
             details_storage,
             signal_handling_mode: self.signal_handling_mode,
             details,
+            clock,
         });
 
         if config.global.node.cleanup_dead_nodes_on_creation {
@@ -1655,6 +1800,10 @@ impl NodeBuilder {
             Err(MonitoringCreateTokenError::SystemCorrupted) => {
                 fail!(from self, with NodeCreationFailure::SystemCorrupted,
                     "{msg} since some external instance removed the underlying resources of the monitoring token.");
+            }
+            Err(MonitoringCreateTokenError::InterruptedBySignal) => {
+                fail!(from self, with NodeCreationFailure::InterruptedBySignal,
+                    "{msg} since a signal was raised.");
             }
         }
     }

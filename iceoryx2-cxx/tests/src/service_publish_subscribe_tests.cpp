@@ -468,6 +468,90 @@ TYPED_TEST(ServicePublishSubscribeTest, loan_slice_uninit_send_receive_works) {
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 
+TYPED_TEST(ServicePublishSubscribeTest, truncated_loan_slice_uninit_delivers_its_first_elements) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    constexpr auto SLICE_MAX_LENGTH = 10;
+    constexpr uint64_t TRUNCATED_LENGTH = 4;
+
+    const auto service_name = iox2::testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service =
+        node.service_builder(service_name).template publish_subscribe<bb::Slice<DummyData>>().create().value();
+
+    auto sut_publisher = service.publisher_builder().initial_max_slice_len(SLICE_MAX_LENGTH).create().value();
+    auto sut_subscriber = service.subscriber_builder().create().value();
+
+    auto send_sample = sut_publisher.loan_slice_uninit(SLICE_MAX_LENGTH).value();
+    send_sample.truncate(TRUNCATED_LENGTH);
+    ASSERT_THAT(send_sample.payload_mut().number_of_elements(), Eq(TRUNCATED_LENGTH));
+
+    uint64_t iterations = 0;
+    for (auto& item : send_sample.payload_mut()) {
+        new (&item) DummyData { DummyData::DEFAULT_VALUE_A + iterations, iterations % 2 == 0 };
+        ++iterations;
+    }
+
+    send(assume_init(std::move(send_sample))).value();
+
+    auto recv_result = sut_subscriber.receive().value();
+    ASSERT_TRUE(recv_result.has_value());
+    auto recv_sample = std::move(recv_result.value());
+
+    ASSERT_THAT(recv_sample.payload().number_of_elements(), Eq(TRUNCATED_LENGTH));
+    iterations = 0;
+    for (const auto& item : recv_sample.payload()) {
+        ASSERT_THAT(item.a, Eq(DummyData::DEFAULT_VALUE_A + iterations));
+        ++iterations;
+    }
+}
+
+TYPED_TEST(ServicePublishSubscribeTest, truncated_loan_slice_delivers_its_first_elements) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    constexpr auto SLICE_MAX_LENGTH = 10;
+    constexpr uint64_t TRUNCATED_LENGTH = 4;
+
+    const auto service_name = iox2::testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service =
+        node.service_builder(service_name).template publish_subscribe<bb::Slice<DummyData>>().create().value();
+
+    auto sut_publisher = service.publisher_builder().initial_max_slice_len(SLICE_MAX_LENGTH).create().value();
+    auto sut_subscriber = service.subscriber_builder().create().value();
+
+    auto send_sample = sut_publisher.loan_slice(SLICE_MAX_LENGTH).value();
+    send_sample.truncate(TRUNCATED_LENGTH);
+    ASSERT_THAT(send_sample.payload().number_of_elements(), Eq(TRUNCATED_LENGTH));
+
+    send(std::move(send_sample)).value();
+
+    auto recv_result = sut_subscriber.receive().value();
+    ASSERT_TRUE(recv_result.has_value());
+    ASSERT_THAT(recv_result.value().payload().number_of_elements(), Eq(TRUNCATED_LENGTH));
+}
+
+TYPED_TEST(ServicePublishSubscribeTest, truncating_a_slice_sample_never_grows_it) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    constexpr uint64_t SLICE_MAX_LENGTH = 10;
+    constexpr uint64_t TRUNCATED_LENGTH = 4;
+
+    const auto service_name = iox2::testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service =
+        node.service_builder(service_name).template publish_subscribe<bb::Slice<DummyData>>().create().value();
+
+    auto sut_publisher = service.publisher_builder().initial_max_slice_len(SLICE_MAX_LENGTH).create().value();
+
+    auto sample = sut_publisher.loan_slice(SLICE_MAX_LENGTH).value();
+    sample.truncate(SLICE_MAX_LENGTH + 1);
+    ASSERT_THAT(sample.payload().number_of_elements(), Eq(SLICE_MAX_LENGTH));
+    sample.truncate(TRUNCATED_LENGTH);
+    sample.truncate(SLICE_MAX_LENGTH);
+    ASSERT_THAT(sample.payload().number_of_elements(), Eq(TRUNCATED_LENGTH));
+}
+
 TYPED_TEST(ServicePublishSubscribeTest, loan_slice_uninit_with_bytes_send_receive_works) {
     constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
     constexpr uint64_t PAYLOAD_ALIGNMENT = 8;
@@ -1633,6 +1717,26 @@ TYPED_TEST(ServicePublishSubscribeTest, subscriber_details_are_correct) {
     ASSERT_THAT(counter, Eq(1));
 }
 
+TYPED_TEST(ServicePublishSubscribeTest, subscriber_details_contain_the_port_name) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    const auto port_name = PortName::create("subscriber_with_a_name").value();
+
+    const auto service_name = iox2::testing::generate_service_name();
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto sut = node.service_builder(service_name).template publish_subscribe<uint64_t>().create().value();
+    auto subscriber = sut.subscriber_builder().name(port_name).create().value();
+
+    auto counter = 0;
+    sut.dynamic_config().list_subscribers([&](auto details_view) -> auto {
+        counter++;
+        EXPECT_THAT(details_view.subscriber_name().to_string().unchecked_access().c_str(),
+                    StrEq(port_name.to_string().unchecked_access().c_str()));
+        return CallbackProgression::Stop;
+    });
+
+    ASSERT_THAT(counter, Eq(1));
+}
+
 TYPED_TEST(ServicePublishSubscribeTest, listing_all_publishers_works) {
     constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
     constexpr uint64_t NUMBER_OF_PUBLISHERS = 16;
@@ -1709,6 +1813,26 @@ TYPED_TEST(ServicePublishSubscribeTest, publisher_details_are_correct) {
         EXPECT_TRUE(publisher_details_view.publisher_id() == publisher.id());
         EXPECT_TRUE(publisher_details_view.node_id() == node.id());
         EXPECT_TRUE(publisher_details_view.max_slice_len() == INITIAL_MAX_SLICE_LEN);
+        return CallbackProgression::Stop;
+    });
+
+    ASSERT_THAT(counter, Eq(1));
+}
+
+TYPED_TEST(ServicePublishSubscribeTest, publisher_details_contain_the_port_name) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    const auto port_name = PortName::create("publisher_with_a_name").value();
+
+    const auto service_name = iox2::testing::generate_service_name();
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto sut = node.service_builder(service_name).template publish_subscribe<uint64_t>().create().value();
+    auto publisher = sut.publisher_builder().name(port_name).create().value();
+
+    auto counter = 0;
+    sut.dynamic_config().list_publishers([&](auto details_view) -> auto {
+        counter++;
+        EXPECT_THAT(details_view.publisher_name().to_string().unchecked_access().c_str(),
+                    StrEq(port_name.to_string().unchecked_access().c_str()));
         return CallbackProgression::Stop;
     });
 

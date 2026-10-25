@@ -52,6 +52,7 @@ impl Identified for ServiceSettings {
 pub enum PatternSettings {
     PublishSubscribe(PublishSubscribeSettings),
     Event(EventSettings),
+    RequestResponse(RequestResponseSettings),
 }
 
 impl PatternSettings {
@@ -60,6 +61,7 @@ impl PatternSettings {
         match self {
             Self::PublishSubscribe(_) => MessagingPattern::PublishSubscribe,
             Self::Event(_) => MessagingPattern::Event,
+            Self::RequestResponse(_) => MessagingPattern::RequestResponse,
         }
     }
 }
@@ -124,6 +126,41 @@ impl EventSettings {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RequestResponseSettings {
+    pub max_servers: usize,
+    pub max_clients: usize,
+    pub max_nodes: usize,
+    pub max_active_requests_per_client: usize,
+    pub max_response_buffer_size: usize,
+    pub max_borrowed_responses_per_pending_response: usize,
+    pub max_loaned_requests: usize,
+    pub safe_overflow_for_requests: bool,
+    pub safe_overflow_for_responses: bool,
+    pub fire_and_forget_requests: bool,
+}
+
+impl RequestResponseSettings {
+    /// The settings a request-response service created with `config`
+    /// receives when none are specified.
+    pub fn from_config(config: &Config) -> Self {
+        let defaults = &config.defaults.request_response;
+        Self {
+            max_servers: defaults.max_servers,
+            max_clients: defaults.max_clients,
+            max_nodes: defaults.max_nodes,
+            max_active_requests_per_client: defaults.max_active_requests_per_client,
+            max_response_buffer_size: defaults.max_response_buffer_size,
+            max_borrowed_responses_per_pending_response: defaults
+                .max_borrowed_responses_per_pending_response,
+            max_loaned_requests: defaults.max_loaned_requests,
+            safe_overflow_for_requests: defaults.enable_safe_overflow_for_requests,
+            safe_overflow_for_responses: defaults.enable_safe_overflow_for_responses,
+            fire_and_forget_requests: defaults.enable_fire_and_forget_requests,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,7 +193,8 @@ mod tests {
             &config,
             MessagingPattern::PublishSubscribe,
         );
-        let described = ServiceDescription::try_from(&static_config).expect("pattern is carried");
+        let described = ServiceDescription::load::<local::Service>(&config, &static_config)
+            .expect("pattern is carried");
         let PatternSettings::PublishSubscribe(settings) = described.settings.pattern else {
             panic!("a publish-subscribe service");
         };
@@ -180,7 +218,8 @@ mod tests {
 
         let static_config =
             static_config_of::<local::Service>(&service_name, &config, MessagingPattern::Event);
-        let described = ServiceDescription::try_from(&static_config).expect("pattern is carried");
+        let described = ServiceDescription::load::<local::Service>(&config, &static_config)
+            .expect("pattern is carried");
         let PatternSettings::Event(settings) = described.settings.pattern else {
             panic!("an event service");
         };

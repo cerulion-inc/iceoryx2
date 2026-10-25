@@ -10,11 +10,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use crate::clock::{ClockListenerSchedule, ClockNow};
 use crate::event::{
     EventId, ListenerCreateError, ListenerWaitError, NotifierNotifyError, NotifierOpenError,
 };
 use crate::named_concept::NamedConceptRemoveError;
 use crate::{dynamic_storage::DynamicStorage, event::event_state::EventState};
+use alloc::sync::Arc;
 use core::fmt::Debug;
 use core::mem::MaybeUninit;
 use core::time::Duration;
@@ -23,11 +25,13 @@ use iceoryx2_bb_container::semantic_string::SemanticString;
 use iceoryx2_bb_derive_macros::ZeroCopySend;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
+use iceoryx2_bb_si_units::TimePoint;
 use iceoryx2_bb_system_types::file_name::FileName;
 use iceoryx2_bb_system_types::file_path::FilePath;
 use iceoryx2_bb_system_types::path::Path;
 use iceoryx2_log::fatal_panic;
 
+pub mod named_pipe;
 pub mod semaphore;
 pub mod socket_pair;
 pub mod stub;
@@ -89,11 +93,13 @@ pub trait WaiterInterface<
         name: &FileName,
         config: &Configuration,
         mgmt: &mut MaybeUninit<Mgmt>,
+        clock: Arc<dyn ClockListenerSchedule>,
     ) -> Result<Self, ListenerCreateError>;
     fn try_wait(&self) -> Result<(), ListenerWaitError>;
-    fn timed_wait(&self, timeout: Duration) -> Result<(), ListenerWaitError>;
+    fn timed_wait(&self, timeout: Duration, now: TimePoint) -> Result<(), ListenerWaitError>;
     fn blocking_wait(&self) -> Result<(), ListenerWaitError>;
     fn empty_buffer(&self) -> Result<(), ListenerWaitError>;
+    fn clock(&self) -> &dyn ClockNow;
 }
 
 pub trait HandlerInterface<

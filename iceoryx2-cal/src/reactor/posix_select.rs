@@ -10,6 +10,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::sync::Arc;
 use core::{fmt::Debug, time::Duration};
 
 use alloc::format;
@@ -24,7 +25,10 @@ use iceoryx2_bb_posix::{
 };
 use iceoryx2_log::fail;
 
-use crate::reactor::{ReactorAttachError, ReactorWaitError};
+use crate::{
+    clock::{ClockReactorSchedule, ClockReactorScheduleError, ScheduleHandle, Timeout},
+    reactor::{ReactorAttachError, ReactorWaitError},
+};
 
 impl crate::reactor::ReactorGuard<'_, '_> for FileDescriptorSetGuard<'_, '_> {
     fn file_descriptor(&self) -> &FileDescriptor {
@@ -35,22 +39,24 @@ impl crate::reactor::ReactorGuard<'_, '_> for FileDescriptorSetGuard<'_, '_> {
 #[derive(Debug)]
 pub struct Reactor {
     set: FileDescriptorSet,
+    clock: Arc<dyn ClockReactorSchedule>,
 }
 
 impl Reactor {
-    fn new() -> Self {
+    fn new(clock: Arc<dyn ClockReactorSchedule>) -> Self {
         Self {
             set: FileDescriptorSet::new(),
+            clock,
         }
     }
 
-    fn wait<
-        F: FnMut(&FileDescriptor),
-        W: FnMut(F, FileEvent) -> Result<usize, FileDescriptorSetWaitError>,
-    >(
+    fn wait(
         &self,
-        fn_call: F,
-        mut wait_call: W,
+        mut fn_call: impl FnMut(&FileDescriptor),
+        mut wait_call: impl FnMut(
+            &mut dyn FnMut(&FileDescriptor),
+            FileEvent,
+        ) -> Result<usize, FileDescriptorSetWaitError>,
         timeout: Duration,
     ) -> Result<usize, super::ReactorWaitError> {
         let msg = "Unable to wait on Reactor";
@@ -69,7 +75,7 @@ impl Reactor {
                 }
             }
         } else {
-            match wait_call(fn_call, FileEvent::Read) {
+            match wait_call(&mut fn_call, FileEvent::Read) {
                 Ok(number_of_notifications) => Ok(number_of_notifications),
                 Err(FileDescriptorSetWaitError::Interrupt) => {
                     fail!(from self, with ReactorWaitError::Interrupt,
@@ -135,21 +141,75 @@ impl crate::reactor::Reactor for Reactor {
     ) -> Result<usize, super::ReactorWaitError> {
         self.wait(
             fn_call,
-            |f: F, event: FileEvent| self.set.timed_wait(Duration::ZERO, event, f),
+            |f, event| self.set.timed_wait(Duration::ZERO, event, f),
             Duration::ZERO,
         )
     }
 
     fn timed_wait<F: FnMut(&FileDescriptor)>(
         &self,
-        fn_call: F,
+        mut fn_call: F,
         timeout: core::time::Duration,
     ) -> Result<usize, super::ReactorWaitError> {
-        self.wait(
-            fn_call,
-            |f: F, event: FileEvent| self.set.timed_wait(timeout, event, f),
-            timeout,
-        )
+        let msg = "Unable to wait on posix_select::Reactor";
+        match self.clock.schedule(Timeout::By(timeout)) {
+            Ok(ScheduleHandle::TranslatedTimeout(t)) => {
+                let now = fail!(from self, when self.clock.now(),
+                                with ReactorWaitError::InternalError,
+                                "{msg} since the current time could not be acquired.");
+                let translated_timeout = t.as_duration(now);
+
+                self.wait(
+                    fn_call,
+                    |f, event| self.set.timed_wait(translated_timeout, event, f),
+                    translated_timeout,
+                )
+            }
+            Ok(ScheduleHandle::GuardAndListener((_guard, listener))) => {
+                let _attachment = match self.attach(&*listener) {
+                    Ok(v) => v,
+                    Err(ReactorAttachError::CapacityExceeded) => {
+                        fail!(from self, with ReactorWaitError::CapacityExceeded,
+                            "{msg} since the wait trigger could not be attached since it would exceed the capacity.");
+                    }
+                    Err(ReactorAttachError::InsufficientResources) => {
+                        fail!(from self, with ReactorWaitError::InsufficientResources,
+                            "{msg} since the wait trigger could not be attached due to insufficient resources.");
+                    }
+                    Err(e) => {
+                        fail!(from self, with ReactorWaitError::InternalError,
+                            "{msg} since the wait trigger could not be attached due to an internal error. [{e:?}]");
+                    }
+                };
+
+                let timeout_trigger_fd = unsafe { listener.file_descriptor().native_handle() };
+                let mut number_of_timeout_triggers = 0;
+                self.wait(
+                    |fd: &FileDescriptor| {
+                        if unsafe { fd.native_handle() == timeout_trigger_fd } {
+                            number_of_timeout_triggers += 1;
+                        } else {
+                            fn_call(fd);
+                        }
+                    },
+                    |f, event| self.set.blocking_wait(event, f),
+                    Duration::MAX,
+                )
+                .map(|count| count - number_of_timeout_triggers)
+            }
+            Err(ClockReactorScheduleError::ClockScheduleCapacityExceeded) => {
+                fail!(from self, with ReactorWaitError::ClockScheduleCapacityExceeded,
+                    "{msg} since the clocks schedule capacity is exceeded.");
+            }
+            Err(ClockReactorScheduleError::ListenerAttachmentFailed) => {
+                fail!(from self, with ReactorWaitError::ListenerAttachmentError,
+                    "{msg} since the listener could not be attached.");
+            }
+            Err(ClockReactorScheduleError::InternalError) => {
+                fail!(from self, with ReactorWaitError::InternalError,
+                    "{msg} since an internal error occured.");
+            }
+        }
     }
 
     fn blocking_wait<F: FnMut(&FileDescriptor)>(
@@ -158,7 +218,7 @@ impl crate::reactor::Reactor for Reactor {
     ) -> Result<usize, super::ReactorWaitError> {
         self.wait(
             fn_call,
-            |f: F, event: FileEvent| self.set.blocking_wait(event, f),
+            |f, event| self.set.blocking_wait(event, f),
             Duration::MAX,
         )
     }
@@ -171,7 +231,10 @@ impl crate::reactor::ReactorBuilder<Reactor> for ReactorBuilder {
         Self {}
     }
 
-    fn create(self) -> Result<Reactor, super::ReactorCreateError> {
-        Ok(Reactor::new())
+    fn create(
+        self,
+        clock: Arc<dyn ClockReactorSchedule>,
+    ) -> Result<Reactor, super::ReactorCreateError> {
+        Ok(Reactor::new(clock))
     }
 }

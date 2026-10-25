@@ -37,6 +37,9 @@ pub enum iox2_node_creation_failure_e {
     INTERNAL_ERROR,
     SYSTEM_CORRUPTED,
     UNABLE_TO_GENERATE_UNIQUE_NODE_ID,
+    UNABLE_TO_OPEN_OR_CREATE_NAME_GENERATOR,
+    FAILED_TO_OPEN_CLOCK,
+    INTERRUPTED_BY_SIGNAL,
 }
 
 impl IntoCInt for NodeCreationFailure {
@@ -49,6 +52,15 @@ impl IntoCInt for NodeCreationFailure {
             NodeCreationFailure::SystemCorrupted => iox2_node_creation_failure_e::SYSTEM_CORRUPTED,
             NodeCreationFailure::UnableToGenerateUniqueNodeId => {
                 iox2_node_creation_failure_e::UNABLE_TO_GENERATE_UNIQUE_NODE_ID
+            }
+            NodeCreationFailure::UnableToOpenOrCreateNameGenerator => {
+                iox2_node_creation_failure_e::UNABLE_TO_OPEN_OR_CREATE_NAME_GENERATOR
+            }
+            NodeCreationFailure::FailedToOpenClock => {
+                iox2_node_creation_failure_e::FAILED_TO_OPEN_CLOCK
+            }
+            NodeCreationFailure::InterruptedBySignal => {
+                iox2_node_creation_failure_e::INTERRUPTED_BY_SIGNAL
             }
         }) as c_int
     }

@@ -381,7 +381,7 @@ impl<
         let origin = "Server::new()";
         let service = &server_factory.factory.service;
         let server_id = fail!(from origin,
-            when UniqueServerId::new::<Service>(server_factory.config.port_name, service.shared_node().config()),
+            when UniqueServerId::new::<Service>(server_factory.config.port_name, service.shared_node().id_generator()),
             with ServerCreateError::UnableToGenerateUniqueServerId, "{msg} since the UniqueServerId could not be generated.");
         // !MUST! be the first thing that is created when a new port is instantiated otherwise the
         // port resources might leak if this process is killed in between.
@@ -481,8 +481,9 @@ impl<
             segment_states: {
                 let mut v =
                     alloc::vec::Vec::<SegmentState>::with_capacity(max_number_of_segments as usize);
-                for _ in 0..max_number_of_segments {
-                    v.push(SegmentState::new(number_of_responses))
+                v.push(SegmentState::new(number_of_responses));
+                for _ in 1..max_number_of_segments {
+                    v.push(SegmentState::new_unallocated(number_of_responses))
                 }
                 v
             },

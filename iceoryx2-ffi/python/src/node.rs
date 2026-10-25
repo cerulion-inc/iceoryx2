@@ -26,6 +26,7 @@ use crate::{
     service_type::ServiceType,
     signal_handling_mode::SignalHandlingMode,
     unique_node_id::UniqueNodeId,
+    waitset_builder::{WaitSetBuilder, WaitSetBuilderType},
 };
 
 pub(crate) enum NodeType {
@@ -141,6 +142,18 @@ impl Node {
         }
     }
 
+    /// Instantiates a `WaitSetBuilder`
+    pub fn waitset_builder(&self) -> WaitSetBuilder {
+        match &*self.0.lock() {
+            NodeType::Ipc(node) => {
+                WaitSetBuilder(Parc::new(WaitSetBuilderType::Ipc(node.waitset_builder())))
+            }
+            NodeType::Local(node) => {
+                WaitSetBuilder(Parc::new(WaitSetBuilderType::Local(node.waitset_builder())))
+            }
+        }
+    }
+
     /// Waits for a given ``cycle_time``.
     /// On failure it emits a `NodeWaitFailure`.
     pub fn wait(&self, cycle_time: &Duration, py: Python<'_>) -> PyResult<()> {
@@ -183,12 +196,12 @@ impl Node {
         match &*self.0.lock() {
             NodeType::Ipc(node) => unsafe {
                 Ok(node
-                    .force_remove_service(&name.0, (*messaging_pattern).into())
+                    .force_remove_service(&name.0, (*messaging_pattern).clone().into())
                     .map_err(|e| ServiceRemoveError::new_err(format!("{e:?}")))?)
             },
             NodeType::Local(node) => unsafe {
                 Ok(node
-                    .force_remove_service(&name.0, (*messaging_pattern).into())
+                    .force_remove_service(&name.0, (*messaging_pattern).clone().into())
                     .map_err(|e| ServiceRemoveError::new_err(format!("{e:?}")))?)
             },
         }

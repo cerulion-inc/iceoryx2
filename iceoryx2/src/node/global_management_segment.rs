@@ -41,6 +41,7 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct GlobalManagementSegment<S: Service> {
     storage: S::PersistentDynamicStorage<State>,
 }

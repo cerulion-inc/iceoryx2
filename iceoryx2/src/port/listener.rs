@@ -73,14 +73,13 @@ use core::ptr::NonNull;
 use core::time::Duration;
 use iceoryx2_bb_concurrency::atomic::Ordering;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
-use iceoryx2_bb_lock_free::mpmc::counting_bit_set::RelocatableCountingBitSet;
 use iceoryx2_bb_posix::file_descriptor::{FileDescriptor, FileDescriptorBased};
 use iceoryx2_bb_posix::file_descriptor_set::SynchronousMultiplexing;
 use iceoryx2_cal::arc_sync_policy::ArcSyncPolicy;
 use iceoryx2_cal::bag::BagFamily;
 use iceoryx2_cal::dynamic_storage::DynamicStorage;
 use iceoryx2_cal::event::event_state::EventActivation;
-use iceoryx2_cal::event::{EventId, ListenerBuilder, NamedConceptMgmt};
+use iceoryx2_cal::event::{EventId, ListenerBuilder, ListenerWaitInterface, NamedConceptMgmt};
 use iceoryx2_cal::named_concept::{NamedConceptBuilder, NamedConceptRemoveError};
 use iceoryx2_log::fail;
 
@@ -119,9 +118,8 @@ impl core::error::Error for ListenerCreateError {}
 #[derive(Debug)]
 pub struct Listener<Service: service::Service> {
     dynamic_listener_handle: <Service::Bag as BagFamily>::BagHandle,
-    listener: Service::ArcThreadSafetyPolicy<
-        <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::Listener,
-    >,
+    listener:
+        Service::ArcThreadSafetyPolicy<<Service::Event as iceoryx2_cal::event::Event>::Listener>,
     service_state: SharedServiceState<Service, NoResource>,
     listener_details: &'static ListenerDetails,
     // IMPORTANT!
@@ -134,23 +132,20 @@ pub struct Listener<Service: service::Service> {
 }
 
 unsafe impl<Service: service::Service> Send for Listener<Service> where
-    Service::ArcThreadSafetyPolicy<
-        <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::Listener,
-    >: Send + Sync
+    Service::ArcThreadSafetyPolicy<<Service::Event as iceoryx2_cal::event::Event>::Listener>:
+        Send + Sync
 {
 }
 
 unsafe impl<Service: service::Service> Sync for Listener<Service> where
-    Service::ArcThreadSafetyPolicy<
-        <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::Listener,
-    >: Send + Sync
+    Service::ArcThreadSafetyPolicy<<Service::Event as iceoryx2_cal::event::Event>::Listener>:
+        Send + Sync
 {
 }
 
 impl<Service: service::Service> FileDescriptorBased for Listener<Service>
 where
-    <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::Listener:
-        FileDescriptorBased,
+    <Service::Event as iceoryx2_cal::event::Event>::Listener: FileDescriptorBased,
 {
     fn file_descriptor(&self) -> &FileDescriptor {
         let fd = self.listener.lock().file_descriptor() as *const FileDescriptor;
@@ -161,8 +156,7 @@ where
 }
 
 impl<Service: service::Service> SynchronousMultiplexing for Listener<Service> where
-    <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::Listener:
-        SynchronousMultiplexing
+    <Service::Event as iceoryx2_cal::event::Event>::Listener: SynchronousMultiplexing
 {
 }
 
@@ -195,7 +189,7 @@ impl<Service: service::Service> Listener<Service> {
         let msg = "Failed to create listener";
         let origin = "Listener::new()";
         let listener_id = fail!(from origin,
-            when UniqueListenerId::new::<Service>(config.port_name, service.shared_node().config()),
+            when UniqueListenerId::new::<Service>(config.port_name, service.shared_node().id_generator()),
             with ListenerCreateError::UnableToGenerateUniqueListenerId,
             "{msg} since the UniqueListenerId could not be generated");
 
@@ -213,9 +207,9 @@ impl<Service: service::Service> Listener<Service> {
         let event_config = event_config::<Service>(service.shared_node().config());
 
         let listener = fail!(from origin,
-                             when <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::ListenerBuilder::new(&event_name).config(&event_config)
+                             when <Service::Event as iceoryx2_cal::event::Event>::ListenerBuilder::new(&event_name).config(&event_config)
                                 .event_id_max(EventId::new(service.static_config().event().event_id_max_value))
-                                .create(),
+                                .create(service.shared_node().clock()),
                              with ListenerCreateError::ResourceCreationFailed,
                              "{} since the underlying event concept \"{}\" could not be created.", msg, event_name);
         let listener = Service::ArcThreadSafetyPolicy::new(listener);
@@ -276,10 +270,9 @@ impl<Service: service::Service> Listener<Service> {
     /// calls the provided callback with the [`EventActivation`] as input argument.
     pub fn try_wait<F: FnMut(EventActivation)>(
         &self,
-        callback: F,
+        mut callback: F,
     ) -> Result<u64, ListenerWaitError> {
-        use iceoryx2_cal::event::Listener;
-        let number_of_notifications = fail!(from self, when self.listener.lock().try_wait(callback),
+        let number_of_notifications = fail!(from self, when self.listener.lock().try_wait(&mut callback),
                                             "Failed try_wait on underlying event::Listener");
         Ok(number_of_notifications)
     }
@@ -289,11 +282,10 @@ impl<Service: service::Service> Listener<Service> {
     /// calls the provided callback with the [`EventActivation`] as input argument.
     pub fn timed_wait<F: FnMut(EventActivation)>(
         &self,
-        callback: F,
+        mut callback: F,
         timeout: Duration,
     ) -> Result<u64, ListenerWaitError> {
-        use iceoryx2_cal::event::Listener;
-        let number_of_notifications = fail!(from self, when self.listener.lock().timed_wait(callback, timeout),
+        let number_of_notifications = fail!(from self, when self.listener.lock().timed_wait(&mut callback, timeout),
                                             "Failed timed_wait({:?}) on underlying event::Listener", timeout);
         Ok(number_of_notifications)
     }
@@ -303,10 +295,9 @@ impl<Service: service::Service> Listener<Service> {
     /// calls the provided callback with the [`EventActivation`] as input argument.
     pub fn blocking_wait<F: FnMut(EventActivation)>(
         &self,
-        callback: F,
+        mut callback: F,
     ) -> Result<u64, ListenerWaitError> {
-        use iceoryx2_cal::event::Listener;
-        let number_of_notifications = fail!(from self, when self.listener.lock().blocking_wait(callback),
+        let number_of_notifications = fail!(from self, when self.listener.lock().blocking_wait(&mut callback),
                                             "Failed blocking_wait on underlying event::Listener");
         Ok(number_of_notifications)
     }

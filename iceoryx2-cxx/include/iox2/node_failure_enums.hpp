@@ -51,6 +51,12 @@ enum class NodeCreationFailure : uint8_t {
     SystemCorrupted,
     /// The [`UniqueNodeId`] could not be generated.
     UnableToGenerateUniqueNodeId,
+    /// The [`NameGenerator`] could not be opened/created.
+    UnableToOpenOrCreateNameGenerator,
+    /// The [`Clock`] used for all time related operations could not be opened.
+    FailedToOpenClock,
+    /// A [`Signal`] was raised while creating the [`Node`]
+    InterruptedBySignal,
 };
 
 /// Failures of [`DeadNodeView::remove_stale_resources()`] that occur when the stale resources of

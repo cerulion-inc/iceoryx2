@@ -16,6 +16,7 @@ pub mod implementations;
 pub mod recommended;
 pub mod trigger;
 
+use crate::clock::ClockListenerSchedule;
 pub use crate::named_concept::{NamedConcept, NamedConceptBuilder, NamedConceptMgmt};
 pub use iceoryx2_bb_system_types::file_name::*;
 pub use iceoryx2_bb_system_types::path::Path;
@@ -23,6 +24,7 @@ pub use iceoryx2_bb_system_types::path::Path;
 pub use implementations::*;
 
 use crate::event::event_state::{EventActivation, EventState, EventStateActivateError};
+use alloc::sync::Arc;
 use core::{fmt::Debug, time::Duration};
 use iceoryx2_bb_derive_macros::ZeroCopySend;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
@@ -84,7 +86,9 @@ impl core::error::Error for NotifierOpenError {}
 pub enum ListenerWaitError {
     ContractViolation,
     InternalFailure,
+    ClockScheduleCapacityExceeded,
     InterruptSignal,
+    NotificationError,
 }
 
 impl core::fmt::Display for ListenerWaitError {
@@ -120,20 +124,26 @@ impl From<EventStateActivateError> for NotifierNotifyError {
     }
 }
 
-pub trait Listener<E: EventState>: NamedConcept + Debug + Abandonable + Send {
+pub trait ListenerWaitInterface {
+    fn try_wait(&self, callback: &mut dyn FnMut(EventActivation))
+    -> Result<u64, ListenerWaitError>;
+    fn timed_wait(
+        &self,
+        callback: &mut dyn FnMut(EventActivation),
+        timeout: Duration,
+    ) -> Result<u64, ListenerWaitError>;
+    fn blocking_wait(
+        &self,
+        callback: &mut dyn FnMut(EventActivation),
+    ) -> Result<u64, ListenerWaitError>;
+}
+
+pub trait Listener<E: EventState>:
+    NamedConcept + Debug + Abandonable + Send + ListenerWaitInterface
+{
     const IS_FILE_DESCRIPTOR_BASED: bool = false;
 
     fn max_event_count(&self) -> u64;
-    fn try_wait<F: FnMut(EventActivation)>(&self, callback: F) -> Result<u64, ListenerWaitError>;
-    fn timed_wait<F: FnMut(EventActivation)>(
-        &self,
-        callback: F,
-        timeout: Duration,
-    ) -> Result<u64, ListenerWaitError>;
-    fn blocking_wait<F: FnMut(EventActivation)>(
-        &self,
-        callback: F,
-    ) -> Result<u64, ListenerWaitError>;
 }
 
 pub trait Notifier<E: EventState>: NamedConcept + Debug + Abandonable + Send {
@@ -142,22 +152,26 @@ pub trait Notifier<E: EventState>: NamedConcept + Debug + Abandonable + Send {
     fn notify(&self, event_id: EventId) -> Result<(), NotifierNotifyError>;
 }
 
-pub trait NotifierBuilder<E: EventState, T: Event<E>>: NamedConceptBuilder<T> + Debug {
+pub trait NotifierBuilder<T: Event>: NamedConceptBuilder<T> + Debug {
     fn timeout(self, timeout: Duration) -> Self;
     fn fail_when_buffer_is_full(self, value: bool) -> Self;
     fn open(self) -> Result<T::Notifier, NotifierOpenError>;
 }
 
-pub trait ListenerBuilder<E: EventState, T: Event<E>>: NamedConceptBuilder<T> + Debug {
+pub trait ListenerBuilder<T: Event>: NamedConceptBuilder<T> + Debug {
     fn event_id_max(self, id: EventId) -> Self;
-    fn create(self) -> Result<T::Listener, ListenerCreateError>;
+    fn create(
+        self,
+        clock: Arc<dyn ClockListenerSchedule>,
+    ) -> Result<T::Listener, ListenerCreateError>;
 }
 
-pub trait Event<E: EventState>: Sized + NamedConceptMgmt + Debug {
-    type Listener: Listener<E>;
-    type ListenerBuilder: ListenerBuilder<E, Self>;
-    type Notifier: Notifier<E>;
-    type NotifierBuilder: NotifierBuilder<E, Self>;
+pub trait Event: Sized + NamedConceptMgmt + Debug {
+    type State: EventState;
+    type Listener: Listener<Self::State>;
+    type ListenerBuilder: ListenerBuilder<Self>;
+    type Notifier: Notifier<Self::State>;
+    type NotifierBuilder: NotifierBuilder<Self>;
 
     fn does_support_persistency() -> bool;
 
