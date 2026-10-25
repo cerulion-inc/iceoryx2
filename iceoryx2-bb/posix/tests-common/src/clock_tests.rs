@@ -36,8 +36,8 @@ pub fn nanosleep_with_clock_sleeps_at_least_given_amount_of_time() {
 #[test]
 pub fn timebuilder_default_values_are_set_correctly() {
     let time = TimeBuilder::new().create();
-    assert_that!(time.seconds(), eq 0);
-    assert_that!(time.nanoseconds(), eq 0);
+    assert_that!(time.time_point().as_secs(), eq 0);
+    assert_that!(time.time_point().subsec_nanos(), eq 0);
     assert_that!(time.clock_type(), eq ClockType::default());
 }
 
@@ -48,18 +48,9 @@ pub fn timebuilder_creates_time_correctly() {
         .nanoseconds(456)
         .clock_type(ClockType::Realtime)
         .create();
-    assert_that!(time.seconds(), eq 123);
-    assert_that!(time.nanoseconds(), eq 456);
+    assert_that!(time.time_point().as_secs(), eq 123);
+    assert_that!(time.time_point().subsec_nanos(), eq 456);
     assert_that!(time.clock_type(), eq ClockType::Realtime);
-}
-
-#[test]
-pub fn time_conversion_to_duration_works() {
-    let time = TimeBuilder::new().seconds(789).nanoseconds(321).create();
-    let d = time.as_duration();
-
-    assert_that!(d.as_secs(), eq time.seconds());
-    assert_that!(d.subsec_nanos(), eq time.nanoseconds());
 }
 
 #[test]
@@ -78,32 +69,10 @@ pub fn time_now_is_monotonic_with_monotonic_clock() {
 #[test]
 pub fn time_as_timespec_works() {
     let now = Time::now().unwrap();
-    let timespec = now.as_timespec();
+    let timespec = now.time_point().as_timespec();
 
-    assert_that!(timespec.tv_sec, eq now.as_duration().as_secs() as _);
-    assert_that!(timespec.tv_nsec, eq now.as_duration().subsec_nanos() as _);
-}
-
-#[test]
-pub fn relocatable_duration_roundtrip_conversion() {
-    let secs = 123;
-    let nsecs = 456;
-    let duration = Duration::from_secs(secs) + Duration::from_nanos(nsecs);
-    let sut: RelocatableDuration = duration.into();
-    let duration_2: Duration = sut.into();
-
-    assert_that!(duration, eq duration_2);
-    assert_that!(sut.as_secs(), eq duration.as_secs());
-    assert_that!(sut.subsec_nanos(), eq duration.subsec_nanos());
-}
-
-#[test]
-pub fn relocatable_duration_max_value() {
-    let duration = Duration::MAX;
-    let sut: RelocatableDuration = duration.into();
-
-    assert_that!(sut.as_secs(), eq sut.as_secs());
-    assert_that!(sut.subsec_nanos(), eq sut.subsec_nanos());
+    assert_that!(timespec.tv_sec, eq now.time_point().as_secs() as _);
+    assert_that!(timespec.tv_nsec, eq now.time_point().subsec_nanos() as _);
 }
 
 #[test]
@@ -122,8 +91,8 @@ pub fn converting_monotonic_time_to_realtime_time_results_in_nearly_the_same_tim
     let sut_converted = sut_monotonic.to_realtime().unwrap();
 
     let time_diff_in_ms = sut_converted
-        .as_duration()
-        .abs_diff(sut_realtime.as_duration())
+        .time_point()
+        .abs_diff(sut_realtime.time_point())
         .as_millis();
 
     assert_that!(time_diff_in_ms, le 1);

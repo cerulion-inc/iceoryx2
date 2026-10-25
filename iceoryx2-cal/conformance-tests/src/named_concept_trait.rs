@@ -19,7 +19,6 @@ use core::any::Any;
 use core::marker::PhantomData;
 use core::time::Duration;
 use iceoryx2_bb_container::semantic_string::SemanticString;
-use iceoryx2_bb_lock_free::mpmc::counting_bit_set::RelocatableCountingBitSet;
 use iceoryx2_bb_posix::file::AccessMode;
 use iceoryx2_bb_posix::testing::generate_file_path;
 use iceoryx2_bb_system_types::{file_name::FileName, path::Path};
@@ -50,12 +49,16 @@ use iceoryx2_cal::{dynamic_storage::*, named_concept::*};
 
 pub trait NamedConceptTest {
     type Sut: NamedConceptMgmt + 'static;
+    fn new() -> Self;
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>>;
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>>;
@@ -65,7 +68,12 @@ pub struct DynamicStorageTest<T: DynamicStorage<u64> + 'static>(PhantomData<T>);
 
 impl<T: DynamicStorage<u64>> NamedConceptTest for DynamicStorageTest<T> {
     type Sut = T;
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &T::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -79,6 +87,7 @@ impl<T: DynamicStorage<u64>> NamedConceptTest for DynamicStorageTest<T> {
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &T::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -95,7 +104,12 @@ pub struct CommunicationChannelTest<T: CommunicationChannel<u64> + 'static>(Phan
 impl<T: CommunicationChannel<u64> + 'static> NamedConceptTest for CommunicationChannelTest<T> {
     type Sut = T;
 
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -107,6 +121,7 @@ impl<T: CommunicationChannel<u64> + 'static> NamedConceptTest for CommunicationC
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -118,27 +133,39 @@ impl<T: CommunicationChannel<u64> + 'static> NamedConceptTest for CommunicationC
     }
 }
 
-pub struct EventTest<T: Event<RelocatableCountingBitSet> + 'static>(PhantomData<T>);
+pub struct EventTest<T: Event + 'static> {
+    clock: StubClock,
+    _data: PhantomData<T>,
+}
 
-impl<T: Event<RelocatableCountingBitSet> + 'static> NamedConceptTest for EventTest<T> {
+impl<T: Event + 'static> NamedConceptTest for EventTest<T> {
     type Sut = T;
 
+    fn new() -> Self {
+        Self {
+            clock: create_test_clock(),
+            _data: PhantomData,
+        }
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
-        let sut = <Self::Sut as Event<RelocatableCountingBitSet>>::ListenerBuilder::new(name)
+        let sut = <Self::Sut as Event>::ListenerBuilder::new(name)
             .config(config)
-            .create()?;
+            .create(self.clock.clone())?;
 
         Ok(Box::new(sut))
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
-        let sut = <Self::Sut as Event<RelocatableCountingBitSet>>::NotifierBuilder::new(name)
+        let sut = <Self::Sut as Event>::NotifierBuilder::new(name)
             .config(config)
             .open()?;
 
@@ -151,7 +178,12 @@ pub struct ZeroCopyConnectionTest<T: ZeroCopyConnection + 'static>(PhantomData<T
 impl<T: ZeroCopyConnection + 'static> NamedConceptTest for ZeroCopyConnectionTest<T> {
     type Sut = T;
 
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -163,6 +195,7 @@ impl<T: ZeroCopyConnection + 'static> NamedConceptTest for ZeroCopyConnectionTes
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -182,7 +215,12 @@ pub struct StaticStorageTest<T: StaticStorage + 'static>(PhantomData<T>);
 impl<T: StaticStorage + 'static> NamedConceptTest for StaticStorageTest<T> {
     type Sut = T;
 
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -195,6 +233,7 @@ impl<T: StaticStorage + 'static> NamedConceptTest for StaticStorageTest<T> {
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -211,7 +250,12 @@ pub struct SharedMemoryTest<T: SharedMemory<PoolAllocator> + 'static>(PhantomDat
 impl<T: SharedMemory<PoolAllocator> + 'static> NamedConceptTest for SharedMemoryTest<T> {
     type Sut = T;
 
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -227,6 +271,7 @@ impl<T: SharedMemory<PoolAllocator> + 'static> NamedConceptTest for SharedMemory
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -249,7 +294,12 @@ impl<S: SharedMemory<PoolAllocator> + 'static, T: ResizableSharedMemory<PoolAllo
 {
     type Sut = T;
 
+    fn new() -> Self {
+        Self(PhantomData, PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -261,6 +311,7 @@ impl<S: SharedMemory<PoolAllocator> + 'static, T: ResizableSharedMemory<PoolAllo
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -277,7 +328,12 @@ pub struct MonitoringTest<T: Monitoring + 'static>(PhantomData<T>);
 impl<T: Monitoring + 'static> NamedConceptTest for MonitoringTest<T> {
     type Sut = T;
 
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+
     fn create(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -289,6 +345,7 @@ impl<T: Monitoring + 'static> NamedConceptTest for MonitoringTest<T> {
     }
 
     fn open(
+        &self,
         name: &FileName,
         config: &<Self::Sut as NamedConceptMgmt>::Configuration,
     ) -> Result<Box<dyn Any>, Box<dyn core::error::Error>> {
@@ -310,10 +367,11 @@ pub mod named_concept_trait {
 
     #[conformance_test]
     pub fn drop_does_not_panic_when_concept_is_already_removed<T: NamedConceptTest>() {
+        let test = T::new();
         let name = generate_file_path().file_name();
-        let config = generate_isolated_config::<T::Sut>();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
 
-        let sut = T::create(&name, &config).unwrap();
+        let sut = test.create(&name, &config).unwrap();
         assert_that!(unsafe { T::Sut::remove_cfg(&name, &config).unwrap() }, eq true);
 
         // this shall not panic
@@ -322,15 +380,16 @@ pub mod named_concept_trait {
 
     #[conformance_test]
     pub fn does_exist_works<T: NamedConceptTest>() {
+        let test = T::new();
         const NUMBER_OF_ENTITIES: usize = 11;
-        let config = generate_isolated_config::<T::Sut>();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
 
         let mut suts = vec![];
         let mut names = vec![];
 
         for _ in 0..NUMBER_OF_ENTITIES {
             let storage_name = generate_file_path().file_name();
-            let sut = T::create(&storage_name, &config).unwrap();
+            let sut = test.create(&storage_name, &config).unwrap();
             names.push(storage_name);
             suts.push(sut);
         }
@@ -342,9 +401,10 @@ pub mod named_concept_trait {
 
     #[conformance_test]
     pub fn list_and_does_exist_works<T: NamedConceptTest>() {
+        let test = T::new();
         let mut sut_names = vec![];
         const LIMIT: usize = 8;
-        let config = generate_isolated_config::<T::Sut>();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
         let mut entities = vec![];
 
         for i in 0..LIMIT {
@@ -352,7 +412,7 @@ pub mod named_concept_trait {
             sut_names.push(generate_file_path().file_name());
             assert_that!(<T::Sut as NamedConceptMgmt>::does_exist_cfg(&sut_names[i], &config), eq Ok(false));
 
-            entities.push(T::create(&sut_names[i], &config).unwrap());
+            entities.push(test.create(&sut_names[i], &config).unwrap());
             assert_that!(<T::Sut as NamedConceptMgmt>::does_exist_cfg(&sut_names[i], &config), eq Ok(true));
 
             let list = <T::Sut as NamedConceptMgmt>::list_cfg(&config).unwrap();
@@ -383,7 +443,8 @@ pub mod named_concept_trait {
 
     #[conformance_test]
     pub fn custom_suffix_ensures_separation<T: NamedConceptTest>() {
-        let config = generate_isolated_config::<T::Sut>();
+        let test = T::new();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
         let config_1 = unsafe { config.clone().suffix(&FileName::new_unchecked(b".s1")) };
         let config_2 = unsafe { config.suffix(&FileName::new_unchecked(b".s2")) };
 
@@ -394,14 +455,14 @@ pub mod named_concept_trait {
         assert_that!(<T::Sut as NamedConceptMgmt>::list_cfg(&config_1).unwrap(), len 0);
         assert_that!(<T::Sut as NamedConceptMgmt>::list_cfg(&config_2).unwrap(), len 0);
 
-        let sut_1 = T::create(&sut_name, &config_1).unwrap();
+        let sut_1 = test.create(&sut_name, &config_1).unwrap();
 
         assert_that!(<T::Sut as NamedConceptMgmt>::does_exist_cfg(&sut_name, &config_1), eq Ok(true));
         assert_that!(<T::Sut as NamedConceptMgmt>::does_exist_cfg(&sut_name, &config_2), eq Ok(false));
         assert_that!(<T::Sut as NamedConceptMgmt>::list_cfg(&config_1).unwrap(), len 1);
         assert_that!(<T::Sut as NamedConceptMgmt>::list_cfg(&config_2).unwrap(), len 0);
 
-        let sut_2 = T::create(&sut_name, &config_2).unwrap();
+        let sut_2 = test.create(&sut_name, &config_2).unwrap();
 
         assert_that!(<T::Sut as NamedConceptMgmt>::does_exist_cfg(&sut_name, &config_1), eq Ok(true));
         assert_that!(<T::Sut as NamedConceptMgmt>::does_exist_cfg(&sut_name, &config_2), eq Ok(true));
@@ -429,15 +490,16 @@ pub mod named_concept_trait {
 
     #[conformance_test]
     pub fn remove_works<T: NamedConceptTest>() {
+        let test = T::new();
         const NUMBER_OF_ENTITIES: usize = 26;
-        let config = generate_isolated_config::<T::Sut>();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
 
         let mut names = vec![];
 
         for _ in 0..NUMBER_OF_ENTITIES {
             let storage_name = generate_file_path().file_name();
             assert_that!(unsafe { T::Sut::remove_cfg(&storage_name, &config) }, eq Ok(false));
-            let sut = T::create(&storage_name, &config).unwrap();
+            let sut = test.create(&storage_name, &config).unwrap();
             core::mem::forget(sut);
             names.push(storage_name);
         }
@@ -452,23 +514,26 @@ pub mod named_concept_trait {
 
     #[conformance_test]
     pub fn cannot_be_created_twice<T: NamedConceptTest>() {
+        let test = T::new();
         let name = generate_file_path().file_name();
-        let config = generate_isolated_config::<T::Sut>();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
 
-        let _sut = T::create(&name, &config).unwrap();
-        assert_that!(T::create(&name, &config), is_err);
+        let _sut = test.create(&name, &config).unwrap();
+        assert_that!(test.create(&name, &config), is_err);
     }
 
     #[conformance_test]
     pub fn cannot_open_non_existing<T: NamedConceptTest>() {
+        let test = T::new();
         let name = generate_file_path().file_name();
-        let config = generate_isolated_config::<T::Sut>();
+        let config = generate_isolated_config::<<T::Sut as NamedConceptMgmt>::Configuration>();
 
-        assert_that!(T::open(&name, &config), is_err);
+        assert_that!(test.open(&name, &config), is_err);
     }
 
     #[conformance_test]
     pub fn creation_with_custom_path_hint_works<T: NamedConceptTest>() {
+        let test = T::new();
         // generate random file path hint
         let test_dir: Path = generate_file_path().into();
         // prefix name can be hardcoded since we use already a random path
@@ -476,18 +541,19 @@ pub mod named_concept_trait {
 
         let config = generate_custom_config::<T::Sut>(&name, &test_dir);
 
-        assert_that!(T::create(&name, &config), is_ok);
+        assert_that!(test.create(&name, &config), is_ok);
     }
 
     #[conformance_test]
     pub fn custom_path_hint_deleted_after_drop_and_removal<T: NamedConceptTest>() {
+        let test = T::new();
         // generate random file path hint
         let test_dir: Path = generate_file_path().into();
         // prefix name can be hardcoded since we use already a random path
         let name = FileName::new(b"test_prefix").unwrap();
 
         let config = generate_custom_config::<T::Sut>(&name, &test_dir);
-        let sut = T::create(&name, &config);
+        let sut = test.create(&name, &config);
 
         drop(sut);
 

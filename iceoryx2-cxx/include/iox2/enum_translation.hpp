@@ -125,6 +125,12 @@ constexpr auto from<int, iox2::NodeCreationFailure>(const int value) noexcept ->
         return iox2::NodeCreationFailure::SystemCorrupted;
     case iox2_node_creation_failure_e_UNABLE_TO_GENERATE_UNIQUE_NODE_ID:
         return iox2::NodeCreationFailure::UnableToGenerateUniqueNodeId;
+    case iox2_node_creation_failure_e_UNABLE_TO_OPEN_OR_CREATE_NAME_GENERATOR:
+        return iox2::NodeCreationFailure::UnableToOpenOrCreateNameGenerator;
+    case iox2_node_creation_failure_e_FAILED_TO_OPEN_CLOCK:
+        return iox2::NodeCreationFailure::FailedToOpenClock;
+    case iox2_node_creation_failure_e_INTERRUPTED_BY_SIGNAL:
+        return iox2::NodeCreationFailure::InterruptedBySignal;
     }
 
     IOX2_UNREACHABLE();
@@ -143,6 +149,12 @@ from<iox2::NodeCreationFailure, iox2_node_creation_failure_e>(const iox2::NodeCr
         return iox2_node_creation_failure_e_SYSTEM_CORRUPTED;
     case iox2::NodeCreationFailure::UnableToGenerateUniqueNodeId:
         return iox2_node_creation_failure_e_UNABLE_TO_GENERATE_UNIQUE_NODE_ID;
+    case iox2::NodeCreationFailure::UnableToOpenOrCreateNameGenerator:
+        return iox2_node_creation_failure_e_UNABLE_TO_OPEN_OR_CREATE_NAME_GENERATOR;
+    case iox2::NodeCreationFailure::FailedToOpenClock:
+        return iox2_node_creation_failure_e_FAILED_TO_OPEN_CLOCK;
+    case iox2::NodeCreationFailure::InterruptedBySignal:
+        return iox2_node_creation_failure_e_INTERRUPTED_BY_SIGNAL;
     }
 
     IOX2_UNREACHABLE();
@@ -224,6 +236,8 @@ constexpr auto from<int, iox2::NodeWaitFailure>(const int value) noexcept -> iox
         return iox2::NodeWaitFailure::TerminationRequest;
     case iox2_node_wait_failure_e_INTERRUPT:
         return iox2::NodeWaitFailure::Interrupt;
+    case iox2_node_wait_failure_e_INTERNAL_ERROR:
+        return iox2::NodeWaitFailure::InternalError;
     }
 
     IOX2_UNREACHABLE();
@@ -237,6 +251,8 @@ constexpr auto from<iox2::NodeWaitFailure, iox2_node_wait_failure_e>(const iox2:
         return iox2_node_wait_failure_e_TERMINATION_REQUEST;
     case iox2::NodeWaitFailure::Interrupt:
         return iox2_node_wait_failure_e_INTERRUPT;
+    case iox2::NodeWaitFailure::InternalError:
+        return iox2_node_wait_failure_e_INTERNAL_ERROR;
     }
 
     IOX2_UNREACHABLE();
@@ -2153,6 +2169,10 @@ constexpr auto from<int, iox2::ListenerWaitError>(const int value) noexcept -> i
         return iox2::ListenerWaitError::InterruptSignal;
     case iox2_listener_wait_error_e_INTERNAL_FAILURE:
         return iox2::ListenerWaitError::InternalFailure;
+    case iox2_listener_wait_error_e_CLOCK_SCHEDULE_CAPACITY_EXCEEDED:
+        return iox2::ListenerWaitError::ClockScheduleCapacityExceeded;
+    case iox2_listener_wait_error_e_NOTIFICATION_ERROR:
+        return iox2::ListenerWaitError::NotificationError;
     }
 
     IOX2_UNREACHABLE();
@@ -2168,6 +2188,10 @@ constexpr auto from<iox2::ListenerWaitError, iox2_listener_wait_error_e>(const i
         return iox2_listener_wait_error_e_INTERRUPT_SIGNAL;
     case iox2::ListenerWaitError::InternalFailure:
         return iox2_listener_wait_error_e_INTERNAL_FAILURE;
+    case iox2::ListenerWaitError::ClockScheduleCapacityExceeded:
+        return iox2_listener_wait_error_e_CLOCK_SCHEDULE_CAPACITY_EXCEEDED;
+    case iox2::ListenerWaitError::NotificationError:
+        return iox2_listener_wait_error_e_NOTIFICATION_ERROR;
     }
 
     IOX2_UNREACHABLE();
@@ -2825,6 +2849,14 @@ constexpr auto from<int, iox2::WaitSetRunError>(const int value) noexcept -> iox
         return iox2::WaitSetRunError::TerminationRequest;
     case iox2_waitset_run_error_e_INTERRUPT:
         return iox2::WaitSetRunError::Interrupt;
+    case iox2_waitset_run_error_e_CLOCK_SCHEDULE_CAPACITY_EXCEEDED:
+        return iox2::WaitSetRunError::ClockScheduleCapacityExceeded;
+    case iox2_waitset_run_error_e_INSUFFICIENT_CAPACITY:
+        return iox2::WaitSetRunError::InsufficientCapacity;
+    case iox2_waitset_run_error_e_INSUFFICIENT_RESOURCES:
+        return iox2::WaitSetRunError::InsufficientResources;
+    case iox2_waitset_run_error_e_ATTACHMENT_FAILED:
+        return iox2::WaitSetRunError::AttachmentFailed;
     }
 
     IOX2_UNREACHABLE();
@@ -2844,6 +2876,14 @@ constexpr auto from<iox2::WaitSetRunError, iox2_waitset_run_error_e>(const iox2:
         return iox2_waitset_run_error_e_TERMINATION_REQUEST;
     case iox2::WaitSetRunError::Interrupt:
         return iox2_waitset_run_error_e_INTERRUPT;
+    case iox2::WaitSetRunError::ClockScheduleCapacityExceeded:
+        return iox2_waitset_run_error_e_CLOCK_SCHEDULE_CAPACITY_EXCEEDED;
+    case iox2::WaitSetRunError::InsufficientCapacity:
+        return iox2_waitset_run_error_e_INSUFFICIENT_CAPACITY;
+    case iox2::WaitSetRunError::InsufficientResources:
+        return iox2_waitset_run_error_e_INSUFFICIENT_RESOURCES;
+    case iox2::WaitSetRunError::AttachmentFailed:
+        return iox2_waitset_run_error_e_ATTACHMENT_FAILED;
     }
 
     IOX2_UNREACHABLE();
@@ -2976,7 +3016,7 @@ template <>
 constexpr auto from<iox2::BackpressureAction, iox2_backpressure_action_e>(const iox2::BackpressureAction value) noexcept
     -> iox2_backpressure_action_e {
     switch (value) {
-    case iox2::BackpressureAction::FollowBackpressureyStrategy:
+    case iox2::BackpressureAction::FollowBackpressureStrategy:
         return iox2_backpressure_action_e_FOLLOW_BACKPRESSUREY_STRATEGY;
     case iox2::BackpressureAction::Retry:
         return iox2_backpressure_action_e_RETRY;

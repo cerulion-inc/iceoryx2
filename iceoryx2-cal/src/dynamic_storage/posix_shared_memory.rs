@@ -296,7 +296,7 @@ impl<T: Send + Sync + Debug + ZeroCopySend> Builder<'_, T> {
         }
 
         Ok(Storage {
-            shm,
+            shm: shm.into_mapped(),
             name: self.storage_name,
             _phantom_data: PhantomData,
         })
@@ -355,10 +355,8 @@ impl<T: Send + Sync + Debug + ZeroCopySend> Builder<'_, T> {
         );
 
         let origin = format!("{self:?}");
-        if !self
-            .initializer
-            .call(unsafe { &mut (*value).data }, &mut allocator)
-        {
+        let initializer = core::mem::replace(&mut self.initializer, Initializer::new(|_, _| false));
+        if !initializer.call(unsafe { &mut (*value).data }, &mut allocator) {
             unsafe { core::ptr::drop_in_place(value) };
             shm.acquire_ownership();
             fail!(from origin, with DynamicStorageCreateError::InitializationFailed,
@@ -389,7 +387,7 @@ impl<T: Send + Sync + Debug + ZeroCopySend> Builder<'_, T> {
         }
 
         Ok(Storage {
-            shm,
+            shm: shm.into_mapped(),
             name: self.storage_name,
             _phantom_data: PhantomData,
         })
@@ -409,7 +407,7 @@ impl<'builder, T: Send + Sync + Debug + ZeroCopySend> DynamicStorageBuilder<'bui
         self
     }
 
-    fn initializer<F: FnMut(&mut MaybeUninit<T>, &mut BumpAllocator) -> bool + 'builder>(
+    fn initializer<F: FnOnce(&mut MaybeUninit<T>, &mut BumpAllocator) -> bool + 'builder>(
         mut self,
         value: F,
     ) -> Self {
@@ -457,7 +455,7 @@ impl<'builder, T: Send + Sync + Debug + ZeroCopySend> DynamicStorageBuilder<'bui
 /// [`Builder`].
 #[derive(Debug)]
 pub struct Storage<T: Debug + Send + Sync + ZeroCopySend> {
-    shm: SharedMemory,
+    shm: MappedSharedMemory,
     name: FileName,
     _phantom_data: PhantomData<T>,
 }
@@ -468,7 +466,7 @@ unsafe impl<T: Debug + Send + Sync + ZeroCopySend> Sync for Storage<T> {}
 impl<T: Debug + Send + Sync + ZeroCopySend> Abandonable for Storage<T> {
     unsafe fn abandon_in_place(mut this: NonNull<Self>) {
         let this = unsafe { this.as_mut() };
-        unsafe { SharedMemory::abandon_in_place(NonNull::from_mut(&mut this.shm)) };
+        unsafe { MappedSharedMemory::abandon_in_place(NonNull::from_mut(&mut this.shm)) };
     }
 }
 
@@ -563,6 +561,14 @@ impl<T: Send + Sync + Debug + ZeroCopySend> DynamicStorage<T> for Storage<T> {
             (*(self.shm.base_address().as_ptr() as *const Data<T>))
                 .data
                 .assume_init_ref()
+        }
+    }
+
+    unsafe fn get_mut(&self) -> &mut T {
+        unsafe {
+            (*(self.shm.base_address().as_ptr() as *mut Data<T>))
+                .data
+                .assume_init_mut()
         }
     }
 

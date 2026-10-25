@@ -11,6 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::{
+    clock::{ClockListenerSchedule, ClockListenerScheduleError, ScheduleOnHandle, Timeout},
     dynamic_storage::DynamicStorage,
     event::{
         ListenerCreateError, ListenerWaitError, NotifierNotifyError, NotifierOpenError,
@@ -21,6 +22,7 @@ use crate::{
     named_concept::NamedConceptRemoveError,
 };
 use alloc::format;
+use alloc::sync::Arc;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
@@ -38,6 +40,7 @@ use iceoryx2_bb_posix::{
         UnixDatagramSenderBuilder, UnixDatagramSenderCreationError,
     },
 };
+use iceoryx2_bb_si_units::TimePoint;
 use iceoryx2_bb_system_types::file_name::FileName;
 use iceoryx2_bb_system_types::path::Path;
 use iceoryx2_log::{fail, trace};
@@ -161,7 +164,9 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> HandlerInterface<E, (
 
 #[derive(Debug)]
 pub struct UnixDatagramWaiter<E: EventState, Storage: DynamicStorage<State<E, ()>>> {
+    name: FileName,
     receiver: UnixDatagramReceiver,
+    clock: Arc<dyn ClockListenerSchedule>,
     _data_1: PhantomData<E>,
     _data_2: PhantomData<Storage>,
 }
@@ -185,6 +190,7 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> Abandonable
     unsafe fn abandon_in_place(mut this: NonNull<Self>) {
         let this = unsafe { this.as_mut() };
         unsafe { UnixDatagramReceiver::abandon_in_place(NonNull::from_mut(&mut this.receiver)) };
+        unsafe { core::ptr::drop_in_place(&mut this.clock) };
     }
 }
 
@@ -254,6 +260,7 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> WaiterInterface<E, ()
         name: &FileName,
         config: &super::Configuration,
         _mgmt: &mut core::mem::MaybeUninit<()>,
+        clock: Arc<dyn ClockListenerSchedule>,
     ) -> Result<Self, ListenerCreateError> {
         let origin = "UnixDatagramWaiter::create()";
         let msg = "Unable to create unix datagram socket trigger";
@@ -300,7 +307,9 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> WaiterInterface<E, ()
         };
 
         Ok(Self {
+            name: *name,
             receiver,
+            clock,
             _data_1: PhantomData,
             _data_2: PhantomData,
         })
@@ -325,21 +334,44 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> WaiterInterface<E, ()
         }
     }
 
-    fn timed_wait(&self, timeout: core::time::Duration) -> Result<(), ListenerWaitError> {
+    fn timed_wait(
+        &self,
+        timeout: core::time::Duration,
+        now: TimePoint,
+    ) -> Result<(), ListenerWaitError> {
         let msg = "Unable to wait with a timeout for a notification";
         let mut buffer = [0u8; RECEIVE_BUFFER_SIZE as usize];
-        match self.receiver.timed_receive(&mut buffer, timeout) {
-            Ok(RECEIVE_BUFFER_SIZE) => self.empty_buffer(),
-            Ok(_)
-            | Err(UnixDatagramReceiveError::NotConnected)
-            | Err(UnixDatagramReceiveError::ConnectionReset) => Ok(()),
-            Err(UnixDatagramReceiveError::Interrupt) => {
-                fail!(from self, with ListenerWaitError::InterruptSignal,
+
+        match self.clock.schedule_on(Timeout::By(timeout), &self.name) {
+            Ok(ScheduleOnHandle::TranslatedTimeout(t)) => {
+                let translated_timeout = t.as_duration(now);
+                match self.receiver.timed_receive(&mut buffer, translated_timeout) {
+                    Ok(RECEIVE_BUFFER_SIZE) => self.empty_buffer(),
+                    Ok(_)
+                    | Err(UnixDatagramReceiveError::NotConnected)
+                    | Err(UnixDatagramReceiveError::ConnectionReset) => Ok(()),
+                    Err(UnixDatagramReceiveError::Interrupt) => {
+                        fail!(from self, with ListenerWaitError::InterruptSignal,
                     "{msg} since an interrupt signal was raised.");
-            }
-            Err(e) => {
-                fail!(from self, with ListenerWaitError::InternalFailure,
+                    }
+                    Err(e) => {
+                        fail!(from self, with ListenerWaitError::InternalFailure,
                     "{msg} due to an internal failure. [{e:?}]");
+                    }
+                }
+            }
+            Ok(ScheduleOnHandle::Guard(_guard)) => self.blocking_wait(),
+            Err(ClockListenerScheduleError::ClockScheduleCapacityExceeded) => {
+                fail!(from self, with ListenerWaitError::ClockScheduleCapacityExceeded,
+                    "{msg} since the clock schedule is full.");
+            }
+            Err(ClockListenerScheduleError::NotificationFailed) => {
+                fail!(from self, with ListenerWaitError::NotificationError,
+                    "{msg} since the notification failed.");
+            }
+            Err(ClockListenerScheduleError::InternalError) => {
+                fail!(from self, with ListenerWaitError::InternalFailure,
+                    "{msg} due to an internal error.");
             }
         }
     }
@@ -361,6 +393,10 @@ impl<E: EventState, Storage: DynamicStorage<State<E, ()>>> WaiterInterface<E, ()
                     "{msg} due to an internal failure. [{e:?}]");
             }
         }
+    }
+
+    fn clock(&self) -> &dyn crate::clock::ClockNow {
+        &*self.clock
     }
 }
 

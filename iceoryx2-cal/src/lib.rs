@@ -23,6 +23,7 @@ extern crate iceoryx2_bb_loggers;
 
 pub mod arc_sync_policy;
 pub mod bag;
+pub mod clock;
 pub mod communication_channel;
 pub mod dynamic_storage;
 pub mod event;
@@ -35,6 +36,7 @@ pub mod serialize;
 pub mod shared_memory;
 pub mod shm_allocator;
 pub mod static_storage;
+pub mod trigger;
 pub mod zero_copy_connection;
 
 #[doc(hidden)]

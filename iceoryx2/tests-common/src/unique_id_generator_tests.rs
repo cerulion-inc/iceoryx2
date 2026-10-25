@@ -19,26 +19,22 @@ use iceoryx2_bb_posix::unique_system_id::UniqueSystemId;
 use iceoryx2_bb_testing::assert_that;
 use iceoryx2_bb_testing_macros::test;
 
-struct TestUniqueId {
-    id: u64,
-}
-impl TestUniqueId {
-    fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        Self {
-            id: COUNTER.fetch_add(1, Ordering::Relaxed),
-        }
-    }
-    fn value(&self) -> u64 {
-        self.id
-    }
-}
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+struct TestUniqueId {}
+
 impl UniqueIdGenerator for TestUniqueId {
-    fn generate<Service: service::Service>(
-        _entity: Entity,
+    fn open_or_create<Service: service::Service>(
         _config: &Config,
-    ) -> Result<UniqueId, UniqueIdGeneratorGenerateError> {
-        Ok(unsafe { UniqueId::from_raw_id((TestUniqueId::new().value() as u128) << 64) })
+    ) -> Result<Self, UniqueIdGeneratorOpenOrCreateError> {
+        Ok(Self {})
+    }
+
+    fn generate(&self, _entity: &Entity) -> Result<UniqueId, UniqueIdGeneratorGenerateError> {
+        Ok(unsafe {
+            UniqueId::from_raw_id((COUNTER.fetch_add(1, Ordering::Relaxed) as u128) << 64)
+        })
     }
 }
 
@@ -52,7 +48,9 @@ fn unique_id_can_be_created_from_value() {
 #[test]
 fn pid_returns_error_when_not_implemented() {
     let config = Config::global_config();
-    let id = TestUniqueId::generate::<ipc::Service>(Entity::Client(PortName::new_empty()), config)
+    let id_generator = TestUniqueId::open_or_create::<ipc::Service>(config).unwrap();
+    let id = id_generator
+        .generate(&Entity::Client(PortName::new_empty()))
         .unwrap();
     let pid = TestUniqueId::pid(id);
     assert_that!(pid, is_err);
@@ -62,7 +60,9 @@ fn pid_returns_error_when_not_implemented() {
 #[test]
 fn creation_time_returns_error_when_not_implemented() {
     let config = Config::global_config();
-    let id = TestUniqueId::generate::<ipc::Service>(Entity::Client(PortName::new_empty()), config)
+    let id_generator = TestUniqueId::open_or_create::<ipc::Service>(config).unwrap();
+    let id = id_generator
+        .generate(&Entity::Client(PortName::new_empty()))
         .unwrap();
     let time = TestUniqueId::creation_time(id);
     assert_that!(time, is_err);
@@ -74,7 +74,7 @@ fn unique_system_id_is_correctly_converted() {
     let unique_system_id = UniqueSystemId::new().unwrap();
     let unique_id = unsafe { UniqueId::from_raw_id(unique_system_id.value()) };
     assert_that!(unique_id.unique_value() >> 32, eq unique_system_id.counter() as u64);
-    assert_that!(unique_id.unique_value() as u32, eq unique_system_id.pid().value() as u32);
-    assert_that!(unique_id.payload_value() >> 32, eq unique_system_id.creation_time().nanoseconds() as u64);
-    assert_that!(unique_id.payload_value() as u32, eq unique_system_id.creation_time().seconds() as u32);
+    assert_that!(unique_id.unique_value() as u32, eq unique_system_id.pid().value() as _);
+    assert_that!(unique_id.payload_value() >> 32, eq unique_system_id.creation_time().time_point().subsec_nanos() as u64);
+    assert_that!(unique_id.payload_value() as u32, eq unique_system_id.creation_time().time_point().as_secs() as _);
 }

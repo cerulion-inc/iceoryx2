@@ -549,6 +549,7 @@ dependencies = [
  "iceoryx2-bb-memory",
  "iceoryx2-bb-posix",
  "iceoryx2-bb-print",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-cal",
  "iceoryx2-log",
@@ -675,6 +676,7 @@ dependencies = [
  "iceoryx2-bb-elementary",
  "iceoryx2-bb-elementary-traits",
  "iceoryx2-bb-print",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-log",
  "iceoryx2-pal-configuration",
@@ -688,6 +690,16 @@ name = "iceoryx2-bb-print"
 version = "0.10.999"
 dependencies = [
  "iceoryx2-pal-print",
+]
+
+[[package]]
+name = "iceoryx2-bb-si-units"
+version = "0.10.999"
+dependencies = [
+ "iceoryx2-bb-derive-macros",
+ "iceoryx2-bb-elementary-traits",
+ "iceoryx2-log",
+ "serde",
 ]
 
 [[package]]
@@ -741,6 +753,7 @@ dependencies = [
  "iceoryx2-bb-lock-free",
  "iceoryx2-bb-memory",
  "iceoryx2-bb-posix",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-log",
  "postcard",
@@ -785,10 +798,18 @@ name = "iceoryx2-integrations-ros2-examples"
 version = "0.10.999"
 dependencies = [
  "cdr",
+ "flatbuffers",
  "iceoryx2",
  "iceoryx2-integrations-ros2-interop",
+ "iceoryx2-integrations-ros2-link-adapter",
+ "iceoryx2-link",
+ "iceoryx2-link-adapter",
+ "iceoryx2-link-backend",
+ "iceoryx2-link-gateway",
+ "iceoryx2-log",
  "ros-env",
  "rosidl_runtime_rs",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

@@ -55,7 +55,11 @@ impl iceoryx2::service::Service for CustomServiceVariant {
     type BlackboardPayload = iceoryx2_cal::shared_memory::file::Memory<
         iceoryx2_cal::shm_allocator::bump_allocator::BumpAllocator,
     >;
-    type UniqueId = iceoryx2::unique_id_generator::unique_system_id::UniqueSystemId;
+    type UniqueId = iceoryx2::unique_id_generator::unique_system_id::UniqueSystemIdGenerator<
+        CustomServiceVariant,
+    >;
+    type NameGenerator = iceoryx2::name_generator::default_name_generator::DefaultNameGenerator;
+    type Clock = iceoryx2_cal::clock::posix::PosixClock<Self::Event>;
 }
 
 impl iceoryx2::service::internal::ServiceInternal<CustomServiceVariant> for CustomServiceVariant {}

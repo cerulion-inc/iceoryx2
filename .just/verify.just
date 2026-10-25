@@ -15,6 +15,7 @@
 # =============================================================================
 
 [private]
+[no-exit-message]
 _parse-verify-args *flags:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -55,6 +56,7 @@ _parse-verify-args *flags:
     echo "EXTRA_ARGS='$EXTRA_ARGS'"
 
 [private]
+[no-exit-message]
 _verify-dispatch what tool *flags:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -120,6 +122,7 @@ _verify-dispatch what tool *flags:
 # -----------------------------------------------------------------------------
 
 [private]
+[no-exit-message]
 _verify-clippy workspace target_triplet profile has_nostd extra_args:
     #!/usr/bin/env bash
     set -eo pipefail
@@ -170,8 +173,10 @@ _verify-clippy workspace target_triplet profile has_nostd extra_args:
 # -----------------------------------------------------------------------------
 
 # Crates whitelisted for which `cargo miri test` should be run.
-# Paths should be relative to repository root.
-MIRI_WHITELIST_SDK   := ""
+#
+# Whitelisted crates are provided in the form `<path>[:<test filter>]`,
+# with the path being relative to the repository root.
+MIRI_WHITELIST_SDK   := "iceoryx2-link/backend:uninitialized_memory"
 MIRI_WHITELIST_INTEGRATIONS_ZENOH := ""
 MIRI_WHITELIST_INTEGRATIONS_ROS2  := ""
 
@@ -191,9 +196,12 @@ _verify-miri workspace extra_args:
             integrations-ros2)  WHITELIST="{{MIRI_WHITELIST_INTEGRATIONS_ROS2}}" ;;
         esac
 
-        for CRATE in $WHITELIST; do
-            echo "Running cargo +nightly miri test under: $CRATE"
-            (cd "{{justfile_directory()}}/$CRATE" && cargo +nightly miri test {{extra_args}})
+        for ENTRY in $WHITELIST; do
+            CRATE="${ENTRY%%:*}"
+            FILTER="${ENTRY#"$CRATE"}"
+            FILTER="${FILTER#:}"
+            echo "Running cargo +nightly miri test under: $CRATE ${FILTER:+(filter: $FILTER)}"
+            (cd "{{justfile_directory()}}/$CRATE" && cargo +nightly miri test {{extra_args}} $FILTER)
             DID_RUN=true
         done
     done
@@ -219,6 +227,7 @@ _verify-std-propagation what:
     esac
 
 [private]
+[no-exit-message]
 _verify-std-propagation-workspace workspace:
     #!/usr/bin/env bash
     set -euo pipefail

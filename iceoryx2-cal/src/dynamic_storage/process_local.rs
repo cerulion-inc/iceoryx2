@@ -302,6 +302,10 @@ impl<T: Send + Sync + Debug + 'static + ZeroCopySend> DynamicStorage<T> for Stor
         unsafe { (*self.data.data_ptr).assume_init_ref() }
     }
 
+    unsafe fn get_mut(&self) -> &mut T {
+        unsafe { (*self.data.data_ptr).assume_init_mut() }
+    }
+
     fn has_ownership(&self) -> bool {
         self.has_ownership.load(Ordering::Relaxed)
     }
@@ -425,10 +429,8 @@ impl<T: Send + Sync + Debug + 'static + ZeroCopySend> Builder<'_, T> {
         );
 
         let origin = format!("{self:?}");
-        if !self
-            .initializer
-            .call(unsafe { &mut *value }, &mut allocator)
-        {
+        let initializer = core::mem::replace(&mut self.initializer, Initializer::new(|_, _| false));
+        if !initializer.call(unsafe { &mut *value }, &mut allocator) {
             fail!(from origin, with DynamicStorageCreateError::InitializationFailed,
                 "{} since the initialization of the underlying construct failed.", msg);
         }
@@ -468,7 +470,7 @@ impl<'builder, T: Send + Sync + Debug + 'static + ZeroCopySend>
         self
     }
 
-    fn initializer<F: FnMut(&mut MaybeUninit<T>, &mut BumpAllocator) -> bool + 'builder>(
+    fn initializer<F: FnOnce(&mut MaybeUninit<T>, &mut BumpAllocator) -> bool + 'builder>(
         mut self,
         value: F,
     ) -> Self {

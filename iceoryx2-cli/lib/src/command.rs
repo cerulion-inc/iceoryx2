@@ -71,15 +71,21 @@ impl HostEnvironment {
 impl Environment for HostEnvironment {
     // TODO: This can be optimized to make the command look-up quicker
     fn install_paths() -> Result<Vec<PathBuf>> {
-        let mut install_paths: Vec<PathBuf> = env::var("PATH")
-            .context("Failed to read PATH environment variable")?
-            .split(PATH_ENV_VAR_SEPARATOR)
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .collect();
+        let path_var = env::var("PATH").unwrap_or_default();
 
-        install_paths.sort();
-        install_paths.dedup();
+        let mut install_paths: Vec<PathBuf> = Vec::new();
+
+        // The commands located in the iox2 binary folder take precedence over PATH
+        let binary_dir = env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf));
+        let path_dirs = path_var.split(PATH_ENV_VAR_SEPARATOR).map(PathBuf::from);
+
+        for path in binary_dir.into_iter().chain(path_dirs) {
+            if path.is_dir() && !install_paths.contains(&path) {
+                install_paths.push(path);
+            }
+        }
 
         Ok(install_paths)
     }
@@ -214,11 +220,22 @@ where
                 CommandType::Installed,
             )?);
         }
-        commands.sort_by_cached_key(|command| {
+
+        let mut unique_commands: Vec<CommandInfo> = Vec::new();
+        for command in commands {
+            if !unique_commands
+                .iter()
+                .any(|known| known.name == command.name)
+            {
+                unique_commands.push(command);
+            }
+        }
+
+        unique_commands.sort_by_cached_key(|command| {
             command.path.file_name().unwrap_or_default().to_os_string()
         });
 
-        Ok(commands)
+        Ok(unique_commands)
     }
 }
 

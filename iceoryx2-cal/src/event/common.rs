@@ -11,18 +11,20 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::{
+    clock::ClockListenerSchedule,
     dynamic_storage::{
         DynamicStorage, DynamicStorageBuilder, DynamicStorageCreateError, DynamicStorageOpenError,
     },
     event::{
         DEFAULT_MAX_EVENT_ID, Event, EventId, Listener, ListenerBuilder, ListenerCreateError,
-        ListenerWaitError, NamedConcept, NamedConceptBuilder, NamedConceptMgmt, Notifier,
-        NotifierBuilder, NotifierNotifyError, NotifierOpenError,
+        ListenerWaitError, ListenerWaitInterface, NamedConcept, NamedConceptBuilder,
+        NamedConceptMgmt, Notifier, NotifierBuilder, NotifierNotifyError, NotifierOpenError,
         event_state::{EventActivation, EventState},
         trigger::{HandlerInterface, State, WaiterInterface, stub::Stub},
     },
     named_concept::NamedConceptConfiguration,
 };
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull, time::Duration};
@@ -219,8 +221,9 @@ impl<
     Storage: DynamicStorage<State<E, Mgmt>>,
     H: HandlerInterface<E, Mgmt, Storage>,
     W: WaiterInterface<E, Mgmt, Storage>,
-> Event<E> for EventImpl<E, Mgmt, Storage, H, W>
+> Event for EventImpl<E, Mgmt, Storage, H, W>
 {
+    type State = E;
     type Listener = Waiter<E, Mgmt, Storage, W>;
     type ListenerBuilder = WaiterBuilder<E, Mgmt, Storage, H, W>;
     type Notifier = Handle<E, Mgmt, Storage, H>;
@@ -424,10 +427,10 @@ impl<
     W: WaiterInterface<E, Mgmt, Storage>,
 > Waiter<E, Mgmt, Storage, W>
 {
-    fn drain_events<F: FnMut(EventActivation), Fw: FnMut() -> Result<(), ListenerWaitError>>(
+    fn drain_events<Fw: FnMut() -> Result<(), ListenerWaitError>>(
         &self,
         msg: &str,
-        mut callback: F,
+        callback: &mut dyn FnMut(EventActivation),
         mut wait_call: Fw,
     ) -> Result<u64, ListenerWaitError> {
         let mgmt = self.storage.get();
@@ -435,7 +438,7 @@ impl<
         let mut drain = || -> Result<u64, ListenerWaitError> {
             fail!(from self, when self.waiter.empty_buffer(),
                 "{msg} since the wait buffer could not be emptied.");
-            Ok(self.storage.get().event.drain(&mut callback))
+            Ok(self.storage.get().event.drain(callback))
         };
 
         if mgmt
@@ -464,34 +467,68 @@ impl<
     Mgmt: ZeroCopySend + Send + Sync + Debug,
     Storage: DynamicStorage<State<E, Mgmt>>,
     W: WaiterInterface<E, Mgmt, Storage>,
+> ListenerWaitInterface for Waiter<E, Mgmt, Storage, W>
+{
+    fn try_wait(
+        &self,
+        callback: &mut dyn FnMut(EventActivation),
+    ) -> Result<u64, ListenerWaitError> {
+        let msg = "Failed to try wait and acquire all event notifications";
+        self.drain_events(msg, callback, || self.waiter.try_wait())
+    }
+
+    fn timed_wait(
+        &self,
+        callback: &mut dyn FnMut(EventActivation),
+        timeout: Duration,
+    ) -> Result<u64, ListenerWaitError> {
+        let msg = "Failed to wait with timeout and acquire all event notifications";
+        let mut remaining_timeout = timeout;
+        let mut now = fail!(from self, when self.waiter.clock().now(),
+                        with ListenerWaitError::InternalFailure,
+                        "{msg} since the current time could not be acquired.");
+
+        loop {
+            let number_of_events = self.drain_events(msg, callback, || {
+                self.waiter.timed_wait(remaining_timeout, now)
+            })?;
+            if number_of_events != 0 {
+                return Ok(number_of_events);
+            }
+
+            let after_wait_now = fail!(from self, when self.waiter.clock().now(),
+                        with ListenerWaitError::InternalFailure,
+                        "{msg} since the current time could not be acquired.");
+            let elapsed_time: Duration = after_wait_now.abs_diff(now).into();
+            if remaining_timeout < elapsed_time {
+                return Ok(number_of_events);
+            }
+
+            remaining_timeout -= elapsed_time;
+            now = after_wait_now;
+        }
+    }
+
+    fn blocking_wait(
+        &self,
+        callback: &mut dyn FnMut(EventActivation),
+    ) -> Result<u64, ListenerWaitError> {
+        let msg = "Failed to wait with timeout and acquire all event notifications";
+        self.drain_events(msg, callback, || self.waiter.blocking_wait())
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage>,
 > Listener<E> for Waiter<E, Mgmt, Storage, W>
 {
     const IS_FILE_DESCRIPTOR_BASED: bool = W::IS_FILE_DESCRIPTOR_BASED;
 
     fn max_event_count(&self) -> u64 {
         self.storage.get().event.max_event_count()
-    }
-
-    fn try_wait<F: FnMut(EventActivation)>(&self, callback: F) -> Result<u64, ListenerWaitError> {
-        let msg = "Failed to try wait and acquire all event notifications";
-        self.drain_events(msg, callback, || self.waiter.try_wait())
-    }
-
-    fn timed_wait<F: FnMut(EventActivation)>(
-        &self,
-        callback: F,
-        timeout: Duration,
-    ) -> Result<u64, ListenerWaitError> {
-        let msg = "Failed to wait with timeout and acquire all event notifications";
-        self.drain_events(msg, callback, || self.waiter.timed_wait(timeout))
-    }
-
-    fn blocking_wait<F: FnMut(EventActivation)>(
-        &self,
-        callback: F,
-    ) -> Result<u64, ListenerWaitError> {
-        let msg = "Failed to wait with timeout and acquire all event notifications";
-        self.drain_events(msg, callback, || self.waiter.blocking_wait())
     }
 }
 
@@ -545,7 +582,7 @@ impl<
     Storage: DynamicStorage<State<E, Mgmt>>,
     H: HandlerInterface<E, Mgmt, Storage>,
     W: WaiterInterface<E, Mgmt, Storage>,
-> NotifierBuilder<E, EventImpl<E, Mgmt, Storage, H, W>> for HandleBuilder<E, Mgmt, Storage, H, W>
+> NotifierBuilder<EventImpl<E, Mgmt, Storage, H, W>> for HandleBuilder<E, Mgmt, Storage, H, W>
 {
     fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -559,7 +596,7 @@ impl<
 
     fn open(
         self,
-    ) -> Result<<EventImpl<E, Mgmt, Storage, H, W> as Event<E>>::Notifier, NotifierOpenError> {
+    ) -> Result<<EventImpl<E, Mgmt, Storage, H, W> as Event>::Notifier, NotifierOpenError> {
         let msg = "Failed to open notifier";
         let storage = match Storage::Builder::new(&self.name)
             .config(&self.config.to_storage_config())
@@ -648,7 +685,7 @@ impl<
     Storage: DynamicStorage<State<E, Mgmt>>,
     H: HandlerInterface<E, Mgmt, Storage>,
     W: WaiterInterface<E, Mgmt, Storage>,
-> ListenerBuilder<E, EventImpl<E, Mgmt, Storage, H, W>> for WaiterBuilder<E, Mgmt, Storage, H, W>
+> ListenerBuilder<EventImpl<E, Mgmt, Storage, H, W>> for WaiterBuilder<E, Mgmt, Storage, H, W>
 {
     fn event_id_max(mut self, id: EventId) -> Self {
         self.event_id_max = id;
@@ -657,8 +694,8 @@ impl<
 
     fn create(
         self,
-    ) -> Result<<EventImpl<E, Mgmt, Storage, H, W> as Event<E>>::Listener, ListenerCreateError>
-    {
+        clock: Arc<dyn ClockListenerSchedule>,
+    ) -> Result<<EventImpl<E, Mgmt, Storage, H, W> as Event>::Listener, ListenerCreateError> {
         let msg = "Failed to create listener";
         let state_size = E::memory_size(self.event_id_max.as_value() + 1);
         let mut waiter = None;
@@ -679,6 +716,7 @@ impl<
                     &self.name,
                     &self.config.to_trigger_config(),
                     &mut unsafe { value.assume_init_mut() }.handle,
+                    clock
                 ) {
                     Ok(w) => waiter = Some(w),
                     Err(e) => {

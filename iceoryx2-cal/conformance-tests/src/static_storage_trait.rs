@@ -37,7 +37,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn create_and_read_works<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "some storage content".to_string();
 
@@ -67,7 +67,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn create_and_read_via_view_works<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "where is my plumbus?".to_string();
 
@@ -94,9 +94,29 @@ pub mod static_storage_trait {
     }
 
     #[conformance_test]
+    pub fn create_and_read_empty_storage_works<Sut: StaticStorage>() {
+        let storage_name = generate_file_path().file_name();
+        let config = generate_isolated_config::<Sut::Configuration>();
+
+        let storage_guard = Sut::Builder::new(&storage_name)
+            .config(&config)
+            .create(&[])
+            .unwrap();
+        assert_that!(storage_guard.view().is_empty(), eq true);
+
+        let storage_reader = Sut::Builder::new(&storage_name)
+            .config(&config)
+            .open(Duration::ZERO)
+            .unwrap();
+        assert_that!(storage_reader.view().is_empty(), eq true);
+        assert_that!(storage_reader.len(), eq 0);
+        assert_that!(storage_reader.read(&mut []), is_ok);
+    }
+
+    #[conformance_test]
     pub fn open_non_existing_fails<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let storage_reader = Sut::Builder::new(&storage_name)
             .config(&config)
@@ -112,7 +132,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn when_storage_guard_goes_out_of_scope_storage_is_removed<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "some storage content".to_string();
         let storage_guard = Sut::Builder::new(&storage_name)
@@ -130,7 +150,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn cannot_create_same_storage_twice<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "some storage content".to_string();
         let _storage_guard = Sut::Builder::new(&storage_name)
@@ -150,7 +170,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn after_reader_is_created_guard_can_be_dropped<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "another\nfunky\nstorage".to_string();
         let storage_guard = Sut::Builder::new(&storage_name)
@@ -190,7 +210,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn last_open_reader_drops_storage<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "another\nfunky\nstorage".to_string();
         let storage_guard = Sut::Builder::new(&storage_name)
@@ -217,7 +237,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn read_same_storage_multiple_times_works<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "another\nfunky\nstorage".to_string();
         let storage_guard = Sut::Builder::new(&storage_name)
@@ -253,7 +273,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn call_read_multiple_times_works<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "and_boom".to_string();
         let storage_guard = Sut::Builder::new(&storage_name)
@@ -287,7 +307,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn read_from_created_storage_works<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "the mushroom asked for a web".to_string();
         let storage = Sut::Builder::new(&storage_name)
@@ -308,7 +328,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn read_with_insufficient_buffer_fails<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let mut content = "some \nfuu\n cont\tent".to_string();
         let _storage_guard = Sut::Builder::new(&storage_name)
@@ -547,7 +567,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn abandoning_locked_static_storage_keeps_it_locked<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
 
         let sut = Sut::Builder::new(&storage_name)
             .config(&config)
@@ -565,7 +585,7 @@ pub mod static_storage_trait {
     #[conformance_test]
     pub fn abandoning_static_storage_keeps_it_available<Sut: StaticStorage>() {
         let storage_name = generate_file_path().file_name();
-        let config = generate_isolated_config::<Sut>();
+        let config = generate_isolated_config::<Sut::Configuration>();
         let content = "another one bites the toad".to_string();
 
         let sut = Sut::Builder::new(&storage_name)

@@ -142,8 +142,10 @@ version = "0.10.999"
 dependencies = [
  "clap",
  "iceoryx2",
+ "iceoryx2-bb-elementary-traits",
  "iceoryx2-bb-loggers",
  "iceoryx2-bb-posix",
+ "iceoryx2-cal",
 ]
 
 [[package]]
@@ -638,6 +640,7 @@ dependencies = [
  "iceoryx2-bb-memory",
  "iceoryx2-bb-posix",
  "iceoryx2-bb-print",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-bb-testing",
  "iceoryx2-cal",
@@ -1004,6 +1007,7 @@ dependencies = [
  "iceoryx2-bb-loggers",
  "iceoryx2-bb-posix-tests-common",
  "iceoryx2-bb-print",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-bb-testing",
  "iceoryx2-log",
@@ -1052,6 +1056,41 @@ name = "iceoryx2-bb-print"
 version = "0.10.999"
 dependencies = [
  "iceoryx2-pal-print",
+]
+
+[[package]]
+name = "iceoryx2-bb-si-units"
+version = "0.10.999"
+dependencies = [
+ "iceoryx2-bb-derive-macros",
+ "iceoryx2-bb-elementary-traits",
+ "iceoryx2-bb-si-units-tests-common",
+ "iceoryx2-bb-testing",
+ "iceoryx2-log",
+ "serde",
+]
+
+[[package]]
+name = "iceoryx2-bb-si-units-tests-common"
+version = "0.10.999"
+dependencies = [
+ "iceoryx2-bb-loggers",
+ "iceoryx2-bb-si-units",
+ "iceoryx2-bb-testing",
+ "iceoryx2-bb-testing-macros",
+]
+
+[[package]]
+name = "iceoryx2-bb-si-units-tests-nostd"
+version = "0.10.999"
+dependencies = [
+ "iceoryx2-bb-elementary-traits",
+ "iceoryx2-bb-loggers",
+ "iceoryx2-bb-memory",
+ "iceoryx2-bb-si-units",
+ "iceoryx2-bb-si-units-tests-common",
+ "iceoryx2-bb-testing",
+ "iceoryx2-bb-testing-macros",
 ]
 
 [[package]]
@@ -1213,6 +1252,7 @@ dependencies = [
  "iceoryx2-bb-loggers",
  "iceoryx2-bb-memory",
  "iceoryx2-bb-posix",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-bb-testing",
  "iceoryx2-cal-tests-common",
@@ -1283,12 +1323,14 @@ dependencies = [
 name = "iceoryx2-cal-tests-common"
 version = "0.10.999"
 dependencies = [
+ "iceoryx2-bb-concurrency",
  "iceoryx2-bb-container",
  "iceoryx2-bb-elementary",
  "iceoryx2-bb-elementary-traits",
  "iceoryx2-bb-loggers",
  "iceoryx2-bb-memory",
  "iceoryx2-bb-posix",
+ "iceoryx2-bb-si-units",
  "iceoryx2-bb-system-types",
  "iceoryx2-bb-testing",
  "iceoryx2-bb-testing-macros",
@@ -1433,6 +1475,7 @@ dependencies = [
  "iceoryx2-log",
  "pyo3",
  "pyo3-log",
+ "toml",
 ]
 
 [[package]]
@@ -1442,6 +1485,7 @@ dependencies = [
  "iceoryx2",
  "iceoryx2-bb-concurrency",
  "iceoryx2-bb-elementary",
+ "iceoryx2-bb-posix",
  "iceoryx2-bb-testing",
  "iceoryx2-link-backend",
  "iceoryx2-log",
@@ -1462,6 +1506,7 @@ version = "0.10.999"
 dependencies = [
  "iceoryx2",
  "iceoryx2-bb-elementary",
+ "iceoryx2-bb-posix",
  "iceoryx2-bb-testing",
  "iceoryx2-log",
  "serde",

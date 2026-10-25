@@ -469,7 +469,7 @@ impl<
         let config = &publisher_factory.config;
         let service = &publisher_factory.factory.service;
         let port_id = fail!(from origin,
-            when UniquePublisherId::new::<Service>(config.port_name, service.shared_node().config()),
+            when UniquePublisherId::new::<Service>(config.port_name, service.shared_node().id_generator()),
             with PublisherCreateError::UnableToGenerateUniquePublisherId,
             "{msg} since the UniquePublisherId could not be generated.");
         // !MUST! be the first thing that is created when a new port is instantiated otherwise the
@@ -557,8 +557,9 @@ impl<
                     segment_states: {
                         let mut v: Vec<SegmentState> =
                             Vec::with_capacity(max_number_of_segments as usize);
-                        for _ in 0..max_number_of_segments {
-                            v.push(SegmentState::new(number_of_samples))
+                        v.push(SegmentState::new(number_of_samples));
+                        for _ in 1..max_number_of_segments {
+                            v.push(SegmentState::new_unallocated(number_of_samples))
                         }
                         v
                     },

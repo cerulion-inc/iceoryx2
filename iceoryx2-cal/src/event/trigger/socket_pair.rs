@@ -11,6 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::{
+    clock::{ClockListenerSchedule, ClockListenerScheduleError, ScheduleOnHandle, Timeout},
     dynamic_storage::{self, DynamicStorage},
     event::{
         ListenerCreateError, ListenerWaitError, NotifierNotifyError, NotifierOpenError,
@@ -20,6 +21,7 @@ use crate::{
     },
     named_concept::NamedConceptRemoveError,
 };
+use alloc::sync::Arc;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use iceoryx2_bb_elementary_traits::{
@@ -33,6 +35,7 @@ use iceoryx2_bb_posix::{
         StreamingSocketPairReceiveError, StreamingSocketPairSendError,
     },
 };
+use iceoryx2_bb_si_units::TimePoint;
 use iceoryx2_bb_system_types::file_name::FileName;
 use iceoryx2_bb_system_types::path::Path;
 use iceoryx2_log::fail;
@@ -144,8 +147,10 @@ impl<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>>
 
 #[derive(Debug)]
 pub struct SocketPairWaiter<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>> {
+    name: FileName,
     mgmt: *mut SocketPairMgmt,
     receiver: StreamingSocket,
+    clock: Arc<dyn ClockListenerSchedule>,
     _data_1: PhantomData<E>,
     _data_2: PhantomData<Storage>,
 }
@@ -189,6 +194,7 @@ impl<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>> Abandonab
     unsafe fn abandon_in_place(mut this: NonNull<Self>) {
         let this = unsafe { this.as_mut() };
         unsafe { core::ptr::drop_in_place(&mut this.receiver) };
+        unsafe { core::ptr::drop_in_place(&mut this.clock) };
     }
 }
 
@@ -229,9 +235,10 @@ impl<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>>
         }
     }
     fn create(
-        _name: &FileName,
+        name: &FileName,
         _config: &super::Configuration,
         mgmt: &mut core::mem::MaybeUninit<SocketPairMgmt>,
+        clock: Arc<dyn ClockListenerSchedule>,
     ) -> Result<Self, ListenerCreateError> {
         let origin = "SocketPairWaiter::create()";
         let msg = "Unable to create socket pair trigger";
@@ -258,8 +265,10 @@ impl<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>>
         mgmt.write(SocketPairMgmt { handler });
 
         Ok(Self {
+            name: *name,
             mgmt: mgmt.as_mut_ptr(),
             receiver: waiter,
+            clock,
             _data_1: PhantomData,
             _data_2: PhantomData,
         })
@@ -285,19 +294,39 @@ impl<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>>
     fn timed_wait(
         &self,
         timeout: core::time::Duration,
+        now: TimePoint,
     ) -> Result<(), crate::event::ListenerWaitError> {
         let msg = "Unable to wait with timeout for a notification";
-        let mut buffer = [0u8; RECEIVE_BUFFER_SIZE];
-        match self.receiver.timed_receive(&mut buffer, timeout) {
-            Ok(RECEIVE_BUFFER_SIZE) => self.empty_buffer(),
-            Ok(_) | Err(StreamingSocketPairReceiveError::ConnectionReset) => Ok(()),
-            Err(StreamingSocketPairReceiveError::Interrupt) => {
-                fail!(from self, with ListenerWaitError::InterruptSignal,
+        match self.clock.schedule_on(Timeout::By(timeout), &self.name) {
+            Ok(ScheduleOnHandle::TranslatedTimeout(t)) => {
+                let translated_timeout = t.as_duration(now);
+
+                let mut buffer = [0u8; RECEIVE_BUFFER_SIZE];
+                match self.receiver.timed_receive(&mut buffer, translated_timeout) {
+                    Ok(RECEIVE_BUFFER_SIZE) => self.empty_buffer(),
+                    Ok(_) | Err(StreamingSocketPairReceiveError::ConnectionReset) => Ok(()),
+                    Err(StreamingSocketPairReceiveError::Interrupt) => {
+                        fail!(from self, with ListenerWaitError::InterruptSignal,
                     "{msg} since an interrupt signal was raised.");
-            }
-            Err(e) => {
-                fail!(from self, with ListenerWaitError::InternalFailure,
+                    }
+                    Err(e) => {
+                        fail!(from self, with ListenerWaitError::InternalFailure,
                     "{msg} due to an internal failure. [{e:?}]");
+                    }
+                }
+            }
+            Ok(ScheduleOnHandle::Guard(_guard)) => self.blocking_wait(),
+            Err(ClockListenerScheduleError::ClockScheduleCapacityExceeded) => {
+                fail!(from self, with ListenerWaitError::ClockScheduleCapacityExceeded,
+                    "{msg} since the clock schedule is full.");
+            }
+            Err(ClockListenerScheduleError::NotificationFailed) => {
+                fail!(from self, with ListenerWaitError::NotificationError,
+                    "{msg} since the notification failed.");
+            }
+            Err(ClockListenerScheduleError::InternalError) => {
+                fail!(from self, with ListenerWaitError::InternalFailure,
+                    "{msg} due to an internal error.");
             }
         }
     }
@@ -317,6 +346,10 @@ impl<E: EventState, Storage: DynamicStorage<State<E, SocketPairMgmt>>>
                     "{msg} due to an internal failure. [{e:?}]");
             }
         }
+    }
+
+    fn clock(&self) -> &dyn crate::clock::ClockNow {
+        &*self.clock
     }
 }
 

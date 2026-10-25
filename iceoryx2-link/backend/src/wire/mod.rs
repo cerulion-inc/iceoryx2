@@ -12,7 +12,6 @@
 
 pub mod event;
 pub mod publish_subscribe;
-mod region;
+pub mod region;
+pub mod request_response;
 pub mod sample;
-
-pub use region::{Region, UnsupportedLength};
