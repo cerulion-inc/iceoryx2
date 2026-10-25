@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iceoryx2_pal_posix::posix::{shm_list, shm_open, shm_unlink};
 
+const SENTINEL: &str = "sentinel-shm-object";
+
 fn last_errno() -> i32 {
     io::Error::last_os_error()
         .raw_os_error()
@@ -52,6 +54,9 @@ fn unsafe_and_symlinked_directories_are_refused() {
     );
 
     std::fs::create_dir(&selected).expect("create selected directory");
+    // A sentinel entry makes the empty `shm_list()` below prove that the
+    // directory was refused, not merely that it was empty.
+    std::fs::write(selected.join(SENTINEL), b"").expect("create sentinel in selected directory");
     set_mode(&selected, 0o777);
 
     let name = CString::new("/unsafe-directory").expect("valid object name");
@@ -73,8 +78,12 @@ fn unsafe_and_symlinked_directories_are_refused() {
     // SAFETY: shm_list reads the configured directory and returns owned name buffers.
     assert!(unsafe { shm_list() }.is_empty());
 
+    std::fs::remove_file(selected.join(SENTINEL)).expect("remove sentinel from selected directory");
     std::fs::remove_dir(&selected).expect("remove unsafe directory");
     std::fs::create_dir(&target).expect("create symlink target");
+    // A sentinel entry makes the empty `shm_list()` below prove that the
+    // symlink was not followed, not merely that its target was empty.
+    std::fs::write(target.join(SENTINEL), b"").expect("create sentinel in symlink target");
     set_mode(&target, 0o700);
     symlink(&target, &selected).expect("replace selected directory with symlink");
 
@@ -99,6 +108,7 @@ fn unsafe_and_symlinked_directories_are_refused() {
     assert!(unsafe { shm_list() }.is_empty());
 
     std::fs::remove_file(&selected).expect("remove directory symlink");
+    std::fs::remove_file(target.join(SENTINEL)).expect("remove sentinel from symlink target");
     std::fs::remove_dir(&target).expect("remove symlink target");
     std::fs::remove_dir(&root).expect("remove test root");
 }
