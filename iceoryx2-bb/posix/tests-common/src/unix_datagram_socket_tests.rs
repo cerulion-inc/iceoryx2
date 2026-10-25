@@ -524,10 +524,13 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
         .map(|_| generate_file_path())
         .collect();
 
-    // The overlap is what makes the masks collide, so it is forced rather than
-    // left to the scheduler: no thread enters `create` until every thread has
-    // reached the barrier, and the saves and restores then interleave on every
-    // run instead of only on an unlucky one.
+    // The overlap is what makes the masks collide. A barrier releases every
+    // thread into `create` at once, but it cannot pin the order of the saves
+    // and restores inside `create`; the scheduler could still run each one to
+    // completion before the next starts. So the release is repeated for many
+    // rounds. A single overlapping pair in any round leaks the mask for good,
+    // so code that moves the umask fails this test on practically every run.
+    const ROUNDS: usize = 64;
     let handle = BarrierHandle::new();
     let barrier = BarrierBuilder::new(CONCURRENT_BINDS as u32)
         .create(&handle)
@@ -544,13 +547,15 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
             scope
                 .thread_builder()
                 .spawn(|| {
-                    barrier.wait();
-                    let receiver = UnixDatagramReceiverBuilder::new(path)
-                        .permission(Permission::OWNER_READ_WRITE)
-                        .creation_mode(CreationMode::PurgeAndCreate)
-                        .create();
-                    assert_that!(receiver, is_ok);
-                    successful_binds.fetch_add(1, Ordering::Relaxed);
+                    for _ in 0..ROUNDS {
+                        barrier.wait();
+                        let receiver = UnixDatagramReceiverBuilder::new(path)
+                            .permission(Permission::OWNER_READ_WRITE)
+                            .creation_mode(CreationMode::PurgeAndCreate)
+                            .create();
+                        assert_that!(receiver, is_ok);
+                        successful_binds.fetch_add(1, Ordering::Relaxed);
+                    }
                 })
                 .unwrap();
         }
@@ -559,7 +564,7 @@ pub fn concurrent_bind_does_not_change_the_process_umask() {
     })
     .unwrap();
 
-    assert_that!(successful_binds.load(Ordering::Relaxed), eq CONCURRENT_BINDS);
+    assert_that!(successful_binds.load(Ordering::Relaxed), eq CONCURRENT_BINDS * ROUNDS);
 
     let after = read_umask();
 
