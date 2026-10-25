@@ -64,15 +64,12 @@ pub unsafe fn pthread_attr_setguardsize(attr: *mut pthread_attr_t, guardsize: si
 }
 
 pub unsafe fn pthread_attr_setinheritsched(_attr: *mut pthread_attr_t, _inheritsched: int) -> int {
-    // libc::pthread_attr_setinheritsched(attr, inheritsched)
-    println!("Android TODO: 'pthread_attr_setinheritsched' is not available!");
+    // Android ignores this scheduling attribute.
     0
 }
 
 pub unsafe fn pthread_attr_setschedpolicy(_attr: *mut pthread_attr_t, _policy: int) -> int {
-    // libc::pthread_attr_setschedpolicy(attr, policy)
-    // not in libc but in toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/pthread.h
-    println!("Android TODO: 'pthread_attr_setschedpolicy' is not available!");
+    // Android ignores this scheduling attribute.
     0
 }
 
@@ -80,9 +77,7 @@ pub unsafe fn pthread_attr_setschedparam(
     _attr: *mut pthread_attr_t,
     _param: *const sched_param,
 ) -> int {
-    // libc::pthread_attr_setschedparam(attr, param)
-    // not in libc but in toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/pthread.h
-    println!("Android TODO: 'pthread_attr_setschedparam' is not available!");
+    // Android ignores this scheduling attribute.
     0
 }
 
@@ -95,10 +90,7 @@ pub unsafe fn pthread_attr_setaffinity_np(
     _cpusetsize: size_t,
     _cpuset: *const cpu_set_t,
 ) -> int {
-    // let cpuset = core::mem::transmute::<cpu_set_t, native_cpu_set_t>(*cpuset);
-    // not in libc and also not in sysroot
-    // this function is not used; shall we remove it
-    println!("Android TODO: 'pthread_attr_setaffinity_np' is not available!");
+    // Android ignores this CPU affinity attribute.
     0
 }
 
@@ -250,14 +242,12 @@ pub unsafe fn pthread_mutexattr_destroy(attr: *mut pthread_mutexattr_t) -> int {
     unsafe { libc::pthread_mutexattr_destroy(attr) }
 }
 
-pub unsafe fn pthread_mutexattr_setprotocol(
-    _attr: *mut pthread_mutexattr_t,
-    _protocol: int,
-) -> int {
-    // internal::pthread_mutexattr_setprotocol(attr, protocol)
-    // not in libc but in toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/pthread.h
-    println!("Android TODO: 'pthread_mutexattr_setprotocol' is not available!");
-    0
+pub unsafe fn pthread_mutexattr_setprotocol(_attr: *mut pthread_mutexattr_t, protocol: int) -> int {
+    if protocol == PTHREAD_PRIO_NONE {
+        0
+    } else {
+        Errno::ENOTSUP as int
+    }
 }
 
 pub unsafe fn pthread_mutexattr_setpshared(attr: *mut pthread_mutexattr_t, pshared: int) -> int {
@@ -268,9 +258,7 @@ pub unsafe fn pthread_mutexattr_setrobust(
     _attr: *mut pthread_mutexattr_t,
     _robustness: int,
 ) -> int {
-    // libc::pthread_mutexattr_setrobust(attr, robustness)
-    // not in libc and also not in sysroot
-    println!("Android TODO: 'pthread_mutexattr_setrobust' is not available!");
+    // Bionic has no robust mutexes; robust requests behave as stalled.
     0
 }
 

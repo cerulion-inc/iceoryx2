@@ -26,6 +26,7 @@
 
 * [#1](https://github.com/eclipse-iceoryx/iceoryx2/issues/1) Example text
 * [#2018](https://github.com/eclipse-iceoryx/iceoryx2/issues/2018) Return `InvalidListenerKey` instead of panicking when notifying with a listener key whose index exceeds the service capacity
+* [#2142](https://github.com/eclipse-iceoryx/iceoryx2/issues/2142) Initialize the node counter of the global management segment when the segment is created
 
 ### Refactoring
 

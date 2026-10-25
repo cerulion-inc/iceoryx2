@@ -12,12 +12,19 @@
 
 use crate::named_concept::*;
 
+#[cfg(target_os = "android")]
+use iceoryx2_bb_concurrency::atomic::{AtomicU32, Ordering};
+#[cfg(target_os = "android")]
+use iceoryx2_bb_posix::process::Process;
+#[cfg(not(target_os = "android"))]
+use iceoryx2_bb_posix::testing::generate_file_path;
 use iceoryx2_bb_posix::{
     config::TEST_DIRECTORY,
     directory::{Directory, DirectoryCreateError},
     file::Permission,
-    testing::generate_file_path,
 };
+#[cfg(target_os = "android")]
+use iceoryx2_bb_system_types::file_name::SemanticString;
 use iceoryx2_log::fatal_panic;
 
 pub fn generate_isolated_config<T: NamedConceptMgmt>() -> T::Configuration {
@@ -30,8 +37,21 @@ pub fn generate_isolated_config<T: NamedConceptMgmt>() -> T::Configuration {
         ),
     };
 
+    #[cfg(target_os = "android")]
+    let prefix = {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let prefix = alloc::format!(
+            "t{:x}_{:x}_",
+            Process::from_self().id().value(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        FileName::new(prefix.as_bytes()).unwrap()
+    };
+    #[cfg(not(target_os = "android"))]
+    let prefix = generate_file_path().file_name();
+
     T::Configuration::default()
-        .prefix(&generate_file_path().file_name())
+        .prefix(&prefix)
         .path_hint(&TEST_DIRECTORY)
 }
 

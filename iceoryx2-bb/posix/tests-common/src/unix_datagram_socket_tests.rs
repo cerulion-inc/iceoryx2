@@ -15,7 +15,8 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use iceoryx2_bb_concurrency::atomic::{AtomicBool, Ordering};
+use iceoryx2_bb_concurrency::atomic::{AtomicBool, AtomicUsize, Ordering};
+use iceoryx2_bb_container::semantic_string::SemanticString;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_posix::barrier::*;
 use iceoryx2_bb_posix::clock::{Time, nanosleep};
@@ -91,6 +92,83 @@ pub fn send_receive_works() {
         .unwrap();
 
     assert_that!(send_data, eq receive_data);
+}
+
+#[test]
+pub fn sender_for_missing_receiver_reports_does_not_exist() {
+    create_test_directory();
+    let socket_name = generate_file_path();
+
+    assert!(matches!(
+        UnixDatagramSenderBuilder::new(&socket_name).create(),
+        Err(UnixDatagramSenderCreationError::DoesNotExist)
+    ));
+
+    drop(
+        UnixDatagramReceiverBuilder::new(&socket_name)
+            .creation_mode(CreationMode::PurgeAndCreate)
+            .create()
+            .unwrap(),
+    );
+
+    assert!(matches!(
+        UnixDatagramSenderBuilder::new(&socket_name).create(),
+        Err(UnixDatagramSenderCreationError::DoesNotExist)
+    ));
+}
+
+#[cfg(target_os = "android")]
+#[test]
+pub fn abstract_socket_delivery_existence_and_recreation_work() {
+    create_test_directory();
+    let socket_name = generate_file_path();
+    let oversized_name = FilePath::new(&[b'a'; 108]).unwrap();
+
+    assert!(matches!(
+        UnixDatagramReceiverBuilder::new(&oversized_name).create(),
+        Err(
+            UnixDatagramReceiverCreationError::UnixDatagramCreationError(
+                UnixDatagramCreationError::SocketNameTooLong
+            )
+        )
+    ));
+
+    assert!(!UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+
+    {
+        let receiver = UnixDatagramReceiverBuilder::new(&socket_name)
+            .creation_mode(CreationMode::CreateExclusive)
+            .create()
+            .unwrap();
+        assert!(UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+
+        let duplicate = UnixDatagramReceiverBuilder::new(&socket_name)
+            .creation_mode(CreationMode::CreateExclusive)
+            .create();
+        assert!(matches!(
+            duplicate,
+            Err(UnixDatagramReceiverCreationError::AddressAlreadyInUse)
+                | Err(UnixDatagramReceiverCreationError::SocketFileAlreadyExists)
+        ));
+
+        let sender = UnixDatagramSenderBuilder::new(&socket_name)
+            .create()
+            .unwrap();
+        let expected = [1_u8, 3, 3, 7, 13];
+        sender.try_send(&expected).unwrap();
+
+        let mut received = [0_u8; 5];
+        receiver.blocking_receive(&mut received).unwrap();
+        assert_eq!(received, expected);
+    }
+
+    assert!(!UnixDatagramReceiver::does_exist(&socket_name).unwrap());
+
+    let _receiver = UnixDatagramReceiverBuilder::new(&socket_name)
+        .creation_mode(CreationMode::CreateExclusive)
+        .create()
+        .unwrap();
+    assert!(UnixDatagramReceiver::does_exist(&socket_name).unwrap());
 }
 
 #[test]
@@ -374,7 +452,10 @@ pub fn abandoning_receiver_leaves_the_socket_but_closes_the_file_descriptor() {
     let close_result = unsafe { posix::close(fd) };
     let errno = Errno::get();
 
+    #[cfg(not(target_os = "android"))]
     assert_that!(UnixDatagramReceiver::does_exist(&socket_name).unwrap(), eq true);
+    #[cfg(target_os = "android")]
+    assert_that!(UnixDatagramReceiver::does_exist(&socket_name).unwrap(), eq false);
     assert_that!(close_result, eq - 1);
     assert_that!(errno, eq Errno::EBADF);
 
@@ -409,4 +490,101 @@ pub fn abandoning_sender_closes_file_descriptor_and_socket_is_still_cleaned_up_f
     drop(sut_receiver);
 
     assert_that!(File::does_exist(&socket_name).unwrap(), eq false);
+}
+
+/// Read the process umask without changing it.
+///
+/// There is no read only form: the only way to observe the mask is to set one
+/// and take the previous value back, so this sets and immediately restores.
+fn read_umask() -> posix::mode_t {
+    unsafe {
+        let previous = posix::umask(0o022);
+        posix::umask(previous);
+        previous
+    }
+}
+
+#[test]
+pub fn concurrent_bind_does_not_change_the_process_umask() {
+    let _watchdog = Watchdog::new();
+
+    create_test_directory();
+
+    let before = read_umask();
+
+    // Several binds at once. One bind alone restores what it saved; two
+    // overlapping ones each save what the other installed, so the restore puts
+    // back a value that was never the original and the process keeps it.
+    //
+    // Measured here: the mask reads `0o7177` afterwards, not `0o177`. The
+    // complement of the permission carries the setuid, setgid and sticky bits
+    // along with the access bits, so those ride into the process mask too.
+    const CONCURRENT_BINDS: usize = 8;
+    let paths: Vec<FilePath> = (0..CONCURRENT_BINDS)
+        .map(|_| generate_file_path())
+        .collect();
+
+    // The overlap is what makes the masks collide. A barrier releases every
+    // thread into `create` at once, but it cannot pin the order of the saves
+    // and restores inside `create`; the scheduler could still run each one to
+    // completion before the next starts. So the release is repeated for many
+    // rounds. A single overlapping pair in any round leaks the mask for good,
+    // so code that moves the umask fails this test on practically every run.
+    const ROUNDS: usize = 64;
+    let handle = BarrierHandle::new();
+    let barrier = BarrierBuilder::new(CONCURRENT_BINDS as u32)
+        .create(&handle)
+        .unwrap();
+
+    // A bind that failed would install no mask at all, so a discarded error
+    // would let this test pass over code that never ran the interleaving. The
+    // count carries the outcome to the calling thread, where it cannot be lost
+    // the way a panic inside a joined thread can.
+    let successful_binds = AtomicUsize::new(0);
+
+    thread_scope(|scope| {
+        for path in &paths {
+            scope
+                .thread_builder()
+                .spawn(|| {
+                    for _ in 0..ROUNDS {
+                        barrier.wait();
+                        let receiver = UnixDatagramReceiverBuilder::new(path)
+                            .permission(Permission::OWNER_READ_WRITE)
+                            .creation_mode(CreationMode::PurgeAndCreate)
+                            .create();
+                        assert_that!(receiver, is_ok);
+                        successful_binds.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .unwrap();
+        }
+        // Every bind has returned before the mask is read again.
+        Ok(())
+    })
+    .unwrap();
+
+    assert_that!(successful_binds.load(Ordering::Relaxed), eq CONCURRENT_BINDS * ROUNDS);
+
+    let after = read_umask();
+
+    // Every bind has returned, so nothing is holding a mask on purpose.
+    assert_that!(after, eq before);
+
+    // The consequence, measured rather than inferred: with a leaked `0o177`
+    // the owner search bit is masked away, so a directory created afterwards
+    // cannot be entered and every stat of a path inside it fails with EACCES.
+    // Raw `mkdir` on purpose: this asks what the kernel does with the process
+    // mask, which is the thing under test.
+    let dir_path = generate_file_path();
+    let dir_c = dir_path.as_c_str();
+    assert_that!(unsafe { posix::mkdir(dir_c, 0o777) }, eq 0);
+
+    let mut attr = core::mem::MaybeUninit::<posix::stat_t>::uninit();
+    assert_that!(unsafe { posix::stat(dir_c, attr.as_mut_ptr()) }, eq 0);
+    let mode = unsafe { attr.assume_init() }.st_mode & 0o777;
+
+    // The owner search bit is what a leaked `0o177` removes, and it is what
+    // every later stat inside the directory depends on.
+    assert_that!(mode & 0o100, eq 0o100);
 }

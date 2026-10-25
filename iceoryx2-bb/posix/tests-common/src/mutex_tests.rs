@@ -427,7 +427,7 @@ pub fn deadlock_detection_blocks() {
 }
 
 #[test]
-#[cfg(not(target_os = "nto"))]
+#[cfg(not(any(target_os = "nto", target_os = "android")))]
 pub fn can_be_recovered_when_thread_died() {
     let _watchdog = Watchdog::new();
     let handle = MutexHandle::<i32>::new();
@@ -476,7 +476,7 @@ pub fn can_be_recovered_when_thread_died() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "macos", target_os = "nto")))]
+#[cfg(not(any(target_os = "macos", target_os = "nto", target_os = "android")))]
 pub fn mutex_in_unrecoverable_state_if_state_of_leaked_mutex_is_not_repaired() {
     let _watchdog = Watchdog::new();
     let handle = MutexHandle::<i32>::new();
