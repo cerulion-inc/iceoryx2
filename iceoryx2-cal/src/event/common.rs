@@ -435,9 +435,16 @@ impl<
         let mut drain = || -> Result<u64, ListenerWaitError> {
             fail!(from self, when self.waiter.empty_buffer(),
                 "{msg} since the wait buffer could not be emptied.");
-            Ok(self.storage.get().event.drain(&mut callback))
+            #[cfg(test)]
+            drain_gap::reached(drain_gap::DrainGap::AfterEmptyBuffer);
+            let activations = self.storage.get().event.drain(&mut callback);
+            #[cfg(test)]
+            drain_gap::reached(drain_gap::DrainGap::AfterEventStateDrain);
+            Ok(activations)
         };
 
+        #[cfg(test)]
+        drain_gap::reached(drain_gap::DrainGap::Entry);
         if mgmt
             .notification_state
             .compare_exchange(
@@ -448,16 +455,94 @@ impl<
             )
             .is_ok()
         {
+            // The swap reads the state and re-arms in one step, so both boundaries are here.
+            #[cfg(test)]
+            drain_gap::reached(drain_gap::DrainGap::AfterStateCheck);
+            #[cfg(test)]
+            drain_gap::reached(drain_gap::DrainGap::AfterRearm);
             return drain();
         }
+        #[cfg(test)]
+        drain_gap::reached(drain_gap::DrainGap::AfterStateCheck);
 
         fail!(from self, when wait_call(),
             "{msg} since the underlying wait call failed.");
+        #[cfg(test)]
+        drain_gap::reached(drain_gap::DrainGap::AfterWaitCall);
         mgmt.notification_state
             .store(NOTIFICATION_STATE_IDLE, Ordering::SeqCst);
+        #[cfg(test)]
+        drain_gap::reached(drain_gap::DrainGap::AfterRearm);
         drain()
     }
 }
+
+/// Lets a test run code at each step boundary of [`Waiter::drain_events()`] on its own thread.
+#[cfg(test)]
+mod drain_gap {
+    use alloc::boxed::Box;
+    use iceoryx2_bb_concurrency::cell::RefCell;
+
+    /// A step boundary inside [`super::Waiter::drain_events()`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum DrainGap {
+        /// Before the drain reads the notification state.
+        Entry,
+        /// After the drain read the notification state and chose its arm.
+        AfterStateCheck,
+        /// After the trigger wait call returned. Only the arm that found no notification
+        /// waits, so a drain of a notified listener never reaches this boundary.
+        AfterWaitCall,
+        /// After the notification state was set back to idle.
+        AfterRearm,
+        /// After the trigger buffer was emptied.
+        AfterEmptyBuffer,
+        /// After the event state was drained into the callback.
+        AfterEventStateDrain,
+    }
+
+    type Hook = Box<dyn FnMut(DrainGap)>;
+
+    std::thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Removes the hook of this thread when dropped.
+    pub(super) struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    /// Calls `hook` at every boundary any drain on this thread reaches, until the guard drops.
+    pub(super) fn install(hook: Hook) -> HookGuard {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+        HookGuard
+    }
+
+    pub(super) fn reached(gap: DrainGap) {
+        // The hook is taken out of its slot while it runs, so a drain started inside the hook
+        // does not borrow the slot twice.
+        let Some(mut hook) = HOOK.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        hook(gap);
+        HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(hook);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod drain_order_model_tests;
+
+#[cfg(test)]
+mod drain_order_seam_tests;
 
 impl<
     E: EventState,
