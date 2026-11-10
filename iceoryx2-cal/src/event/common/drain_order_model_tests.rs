@@ -552,12 +552,14 @@ const ONE_UNIT_LEFT: [Verdict; 4] = [PASSES, PASSES, PASSES, PASSES];
 //    misses a mark that lands after it. It also loses a wake: a notify that activates after
 //    the event state drain skips its send on the notified state, and the swap re-arms over
 //    it. That needs an empty trigger at the end, so the drain must take the unit of the notify
-//    that marked notified after the first re-arm. A blocking wait from an idle empty start
-//    returns only on the unit of a notify that sent before it, and the re-arm after the wait
-//    clears or fails that notify's mark, so only the notify that would skip is left to mark
-//    notified. A one-unit read from a notified start always leaves a unit.
-//  * An idle store after both drains loses the same wakes and is never deaf: a notify that marks
-//    notified after the store claimed after it, so its unit comes after every read.
+//    that marked notified after the first re-arm. From an idle empty start a blocking drain
+//    moves on only after one notify sent: its wait returns on that unit, or its first swap
+//    finds that notify's mark. The other notify is then the one that would skip its send, and
+//    it never claims, so the first re-arm clears or fails the first notify's mark and nothing
+//    marks notified after it. A one-unit read from a notified start always leaves a unit.
+//  * An idle store after both drains loses the same wakes and is never deaf: a mark after the
+//    store lands on the pending state of a notify that claimed after the store, whose unit
+//    comes after every read.
 //  * Consume before rearm passes in every setup.
 const VERDICTS: [SetupVerdicts; 32] = [
     row(IdleEmpty, OneUnit, Try, [1, 2], SEND_IN_THE_WINDOW),

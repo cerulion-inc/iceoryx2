@@ -449,9 +449,11 @@ impl<
         // The trigger is emptied before the state is re-armed. A notify whose byte this drain
         // takes saw the idle or pending state before the store below, so its mark to notified
         // is overwritten by the store, fails on the idle state, or lands on the pending state of
-        // a later notify whose byte is still to come. A notify that skipped its send on the
-        // notified state activated its event before the store, so the event state drain after
-        // the store delivers it.
+        // a later notify whose byte is still to come. A notify that skipped its send on a
+        // notified state set before the store activated its event before the store, so the
+        // event state drain after the store delivers it. A notify that skipped its send on a
+        // notified state set after the store is woken by the byte of the notify that claimed
+        // the pending state after the store, which no read in this drain takes.
         fail!(from self, when self.waiter.empty_buffer(),
             "{msg} since the wait buffer could not be emptied.");
         #[cfg(test)]
