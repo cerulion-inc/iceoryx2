@@ -31,6 +31,12 @@
 //!
 //! A timed wait behaves as a try wait when it times out on an empty trigger and as a blocking
 //! wait otherwise, so the two wait kinds cover it.
+//!
+//! [`VERDICTS`] is the committed table of what the search finds for every drain order in every
+//! setup. [`WITNESSES`] are hand-written schedules that the tests below replay to one end each.
+//! The seam test replays the same schedules, and scripts of its own, on the real drain, and
+//! checks that the real drain ends where [`predict()`] says the model of [`DRAIN_EVENTS_ORDER`]
+//! ends.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -50,7 +56,7 @@ enum NotificationState {
 
 /// How many wake units one receive takes from the trigger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TriggerRead {
+pub(super) enum TriggerRead {
     /// A unix datagram socket: one datagram per receive.
     OneUnit,
     /// A socket pair stream, or a semaphore decremented until it is empty: every unit.
@@ -90,6 +96,9 @@ enum DrainStep {
 
 use DrainStep::{DrainEventState, EmptyBuffer, Rearm, RearmIfNotified, WaitCall};
 use NotificationState::{Idle, Notified, Pending};
+use Start::{IdleEmpty, IdleStrayUnit, NotifiedOneUnit, NotifiedTwoUnits};
+use TriggerRead::{EveryUnit, OneUnit};
+use WaitKind::{Blocking, Try};
 
 #[derive(Debug)]
 struct DrainOrder {
@@ -185,8 +194,9 @@ impl World {
     }
 }
 
+/// The state a setup starts the drain in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Start {
+pub(super) enum Start {
     IdleEmpty,
     /// What a drain leaves when two notifies both sent while pending.
     IdleStrayUnit,
@@ -217,7 +227,7 @@ impl Start {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Setup {
     start: Start,
     trigger: TriggerRead,
@@ -250,15 +260,16 @@ fn every_setup() -> Vec<Setup> {
     setups
 }
 
+/// Who takes the next step of a schedule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Actor {
+pub(super) enum Actor {
     Drain,
     Notifier(usize),
 }
 
-const D: Actor = Actor::Drain;
-const N0: Actor = Actor::Notifier(0);
-const N1: Actor = Actor::Notifier(1);
+pub(super) const D: Actor = Actor::Drain;
+pub(super) const N0: Actor = Actor::Notifier(0);
+pub(super) const N1: Actor = Actor::Notifier(1);
 
 fn take_units(trigger: TriggerRead, units: u8) -> u8 {
     match trigger {
@@ -276,6 +287,14 @@ fn after_step(arm: &[DrainStep], notified: bool, step: usize) -> DrainAt {
         }
     } else {
         DrainAt::Done
+    }
+}
+
+fn arm(order: &DrainOrder, notified: bool) -> &'static [DrainStep] {
+    if notified {
+        order.notified_arm
+    } else {
+        order.other_arm
     }
 }
 
@@ -300,11 +319,7 @@ fn drain_step(order: &DrainOrder, setup: Setup, world: World) -> Option<World> {
             step,
             event_id,
         } => {
-            let arm = if notified {
-                order.notified_arm
-            } else {
-                order.other_arm
-            };
+            let arm = arm(order, notified);
             next.drain = after_step(arm, notified, step);
             match arm[step] {
                 WaitCall => {
@@ -471,49 +486,147 @@ fn violations(order: &DrainOrder) -> Vec<String> {
     lines
 }
 
-fn verdict_over_every_setup(order: &DrainOrder) -> Verdict {
-    let mut verdict = Verdict {
-        deaf: false,
-        lost_wake: false,
-    };
-    for setup in every_setup() {
-        let found = explore(order, setup).verdict();
-        verdict.deaf |= found.deaf;
-        verdict.lost_wake |= found.lost_wake;
-    }
-    verdict
+const PASSES: Verdict = Verdict {
+    deaf: false,
+    lost_wake: false,
+};
+const DEAF: Verdict = Verdict {
+    deaf: true,
+    lost_wake: false,
+};
+const LOSES_A_WAKE: Verdict = Verdict {
+    deaf: false,
+    lost_wake: true,
+};
+const DEAF_AND_LOSES_A_WAKE: Verdict = Verdict {
+    deaf: true,
+    lost_wake: true,
+};
+
+/// The drain orders the table below gives a verdict for, in its column order.
+const ORDERS: [&DrainOrder; 4] = [
+    &REARM_BEFORE_CONSUME,
+    &REARM_AFTER_DRAINS_IF_NOTIFIED,
+    &REARM_AFTER_DRAINS,
+    &CONSUME_BEFORE_REARM,
+];
+
+/// What the exhaustive search must find in one setup, one verdict per order of [`ORDERS`].
+struct SetupVerdicts {
+    setup: Setup,
+    verdicts: [Verdict; 4],
 }
 
-/// What the exhaustive search must find for each drain order. Every order but
-/// [`CONSUME_BEFORE_REARM`] fails a property.
-const BASELINE: [(&DrainOrder, Verdict); 4] = [
-    (
-        &REARM_BEFORE_CONSUME,
-        Verdict {
-            deaf: true,
-            lost_wake: false,
+const fn row(
+    start: Start,
+    trigger: TriggerRead,
+    wait: WaitKind,
+    ids: [usize; 2],
+    verdicts: [Verdict; 4],
+) -> SetupVerdicts {
+    SetupVerdicts {
+        setup: Setup {
+            start,
+            trigger,
+            wait,
+            ids,
         },
+        verdicts,
+    }
+}
+
+const SEND_IN_THE_WINDOW: [Verdict; 4] = [DEAF, DEAF_AND_LOSES_A_WAKE, LOSES_A_WAKE, PASSES];
+const WAKE_FROM_EMPTY: [Verdict; 4] = [DEAF, DEAF, PASSES, PASSES];
+const ONE_UNIT_LEFT: [Verdict; 4] = [PASSES, PASSES, PASSES, PASSES];
+
+// Why each row reads as it does:
+//
+//  * Rearm before consume goes deaf when a notify claims and sends between the re-arm and the
+//    trigger read that takes its unit, and marks notified after it. The arm that waits always
+//    has that window. The notified arm re-arms in its swap, and its single read empties the
+//    trigger only when the read takes every unit: a one-unit read leaves the start's unit or
+//    the notify's unit behind. Its one re-arm comes before the event state drain, so a notify
+//    that skipped its send on the notified state before the re-arm is delivered by that drain,
+//    and one that skipped after it left the state notified: it never loses a wake.
+//  * The swap of notified for idle after both drains is deaf in the same setups, as its swap
+//    misses a mark that lands after it. It also loses a wake: a notify that activates after
+//    the event state drain skips its send on the notified state, and the swap re-arms over
+//    it. That needs an empty trigger at the end, so the drain must take the unit of the notify
+//    that marked notified after the first re-arm. A blocking wait from an idle empty start
+//    returns only on the unit of a notify that sent before it, and the re-arm after the wait
+//    clears or fails that notify's mark, so only the notify that would skip is left to mark
+//    notified. A one-unit read from a notified start always leaves a unit.
+//  * An idle store after both drains loses the same wakes and is never deaf: a notify that marks
+//    notified after the store claimed after it, so its unit comes after every read.
+//  * Consume before rearm passes in every setup.
+const VERDICTS: [SetupVerdicts; 32] = [
+    row(IdleEmpty, OneUnit, Try, [1, 2], SEND_IN_THE_WINDOW),
+    row(IdleEmpty, OneUnit, Try, [1, 1], SEND_IN_THE_WINDOW),
+    row(IdleEmpty, OneUnit, Blocking, [1, 2], WAKE_FROM_EMPTY),
+    row(IdleEmpty, OneUnit, Blocking, [1, 1], WAKE_FROM_EMPTY),
+    row(IdleEmpty, EveryUnit, Try, [1, 2], SEND_IN_THE_WINDOW),
+    row(IdleEmpty, EveryUnit, Try, [1, 1], SEND_IN_THE_WINDOW),
+    row(IdleEmpty, EveryUnit, Blocking, [1, 2], WAKE_FROM_EMPTY),
+    row(IdleEmpty, EveryUnit, Blocking, [1, 1], WAKE_FROM_EMPTY),
+    row(IdleStrayUnit, OneUnit, Try, [1, 2], SEND_IN_THE_WINDOW),
+    row(IdleStrayUnit, OneUnit, Try, [1, 1], SEND_IN_THE_WINDOW),
+    row(IdleStrayUnit, OneUnit, Blocking, [1, 2], SEND_IN_THE_WINDOW),
+    row(IdleStrayUnit, OneUnit, Blocking, [1, 1], SEND_IN_THE_WINDOW),
+    row(IdleStrayUnit, EveryUnit, Try, [1, 2], SEND_IN_THE_WINDOW),
+    row(IdleStrayUnit, EveryUnit, Try, [1, 1], SEND_IN_THE_WINDOW),
+    row(
+        IdleStrayUnit,
+        EveryUnit,
+        Blocking,
+        [1, 2],
+        SEND_IN_THE_WINDOW,
     ),
-    (
-        &REARM_AFTER_DRAINS_IF_NOTIFIED,
-        Verdict {
-            deaf: true,
-            lost_wake: true,
-        },
+    row(
+        IdleStrayUnit,
+        EveryUnit,
+        Blocking,
+        [1, 1],
+        SEND_IN_THE_WINDOW,
     ),
-    (
-        &REARM_AFTER_DRAINS,
-        Verdict {
-            deaf: false,
-            lost_wake: true,
-        },
+    row(NotifiedOneUnit, OneUnit, Try, [1, 2], ONE_UNIT_LEFT),
+    row(NotifiedOneUnit, OneUnit, Try, [1, 1], ONE_UNIT_LEFT),
+    row(NotifiedOneUnit, OneUnit, Blocking, [1, 2], ONE_UNIT_LEFT),
+    row(NotifiedOneUnit, OneUnit, Blocking, [1, 1], ONE_UNIT_LEFT),
+    row(NotifiedOneUnit, EveryUnit, Try, [1, 2], SEND_IN_THE_WINDOW),
+    row(NotifiedOneUnit, EveryUnit, Try, [1, 1], SEND_IN_THE_WINDOW),
+    row(
+        NotifiedOneUnit,
+        EveryUnit,
+        Blocking,
+        [1, 2],
+        SEND_IN_THE_WINDOW,
     ),
-    (
-        &CONSUME_BEFORE_REARM,
-        Verdict {
-            deaf: false,
-            lost_wake: false,
-        },
+    row(
+        NotifiedOneUnit,
+        EveryUnit,
+        Blocking,
+        [1, 1],
+        SEND_IN_THE_WINDOW,
+    ),
+    row(NotifiedTwoUnits, OneUnit, Try, [1, 2], ONE_UNIT_LEFT),
+    row(NotifiedTwoUnits, OneUnit, Try, [1, 1], ONE_UNIT_LEFT),
+    row(NotifiedTwoUnits, OneUnit, Blocking, [1, 2], ONE_UNIT_LEFT),
+    row(NotifiedTwoUnits, OneUnit, Blocking, [1, 1], ONE_UNIT_LEFT),
+    row(NotifiedTwoUnits, EveryUnit, Try, [1, 2], SEND_IN_THE_WINDOW),
+    row(NotifiedTwoUnits, EveryUnit, Try, [1, 1], SEND_IN_THE_WINDOW),
+    row(
+        NotifiedTwoUnits,
+        EveryUnit,
+        Blocking,
+        [1, 2],
+        SEND_IN_THE_WINDOW,
+    ),
+    row(
+        NotifiedTwoUnits,
+        EveryUnit,
+        Blocking,
+        [1, 1],
+        SEND_IN_THE_WINDOW,
     ),
 ];
 
@@ -533,11 +646,194 @@ fn is_quiescent(order: &DrainOrder, setup: Setup, world: World) -> bool {
 }
 
 const DATAGRAM_TRY_FROM_IDLE: Setup = Setup {
-    start: Start::IdleEmpty,
-    trigger: TriggerRead::OneUnit,
-    wait: WaitKind::Try,
+    start: IdleEmpty,
+    trigger: OneUnit,
+    wait: Try,
     ids: [1, 2],
 };
+
+const STREAM_TRY_FROM_NOTIFIED: Setup = Setup {
+    start: NotifiedOneUnit,
+    trigger: EveryUnit,
+    wait: Try,
+    ids: [1, 2],
+};
+
+const DATAGRAM_TRY_FROM_NOTIFIED: Setup = Setup {
+    trigger: OneUnit,
+    ..STREAM_TRY_FROM_NOTIFIED
+};
+
+/// A hand-written schedule of one drain order in one setup.
+pub(super) struct ModelWitness {
+    pub(super) name: &'static str,
+    order: &'static DrainOrder,
+    setup: Setup,
+    schedule: &'static [Actor],
+}
+
+impl ModelWitness {
+    pub(super) fn start(&self) -> Start {
+        self.setup.start
+    }
+
+    pub(super) fn waits_with_try(&self) -> bool {
+        self.setup.wait == Try
+    }
+
+    pub(super) fn notifiers_share_an_event_id(&self) -> bool {
+        self.setup.ids[0] == self.setup.ids[1]
+    }
+
+    /// The schedule with one drain step for each step boundary of the real drain: the model
+    /// drains the event state one id per step, the real drain in one call.
+    pub(super) fn boundary_schedule(&self) -> Vec<Actor> {
+        let mut world = self.setup.start.world();
+        let mut schedule = Vec::new();
+        for (n, actor) in self.schedule.iter().enumerate() {
+            if !(*actor == D && is_inside_the_event_state_drain(self.order, world)) {
+                schedule.push(*actor);
+            }
+            world = step(self.order, self.setup, world, *actor)
+                .unwrap_or_else(|| panic!("step {n} ({actor:?}) is not enabled in {world:?}"));
+        }
+        schedule
+    }
+
+    fn end(&self) -> World {
+        replay(self.order, self.setup, self.schedule)
+    }
+}
+
+pub(super) const REARM_BEFORE_CONSUME_GOES_DEAF: ModelWitness = ModelWitness {
+    name: "rearm before consume goes deaf when a notify sends between the rearm and the consume",
+    order: &REARM_BEFORE_CONSUME,
+    setup: DATAGRAM_TRY_FROM_IDLE,
+    schedule: &[D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1],
+};
+
+pub(super) const CONSUME_BEFORE_REARM_KEEPS_THE_WAKE: ModelWitness = ModelWitness {
+    name: "consume before rearm keeps the wake of a notify that sends during the drain",
+    order: &CONSUME_BEFORE_REARM,
+    setup: DATAGRAM_TRY_FROM_IDLE,
+    schedule: &[D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1, N1, N1],
+};
+
+pub(super) const REARM_AFTER_DRAINS_IF_NOTIFIED_GOES_DEAF: ModelWitness = ModelWitness {
+    name: "rearm after drains if notified goes deaf when the notifier marks after the swap",
+    order: &REARM_AFTER_DRAINS_IF_NOTIFIED,
+    setup: DATAGRAM_TRY_FROM_IDLE,
+    schedule: &[D, D, D, N0, N0, N0, D, D, D, D, D, N0, N1, N1],
+};
+
+pub(super) const REARM_AFTER_DRAINS_IF_NOTIFIED_LOSES_A_WAKE: ModelWitness = ModelWitness {
+    name: "rearm after drains if notified loses the wake of a notify that skipped on notified",
+    order: &REARM_AFTER_DRAINS_IF_NOTIFIED,
+    setup: DATAGRAM_TRY_FROM_IDLE,
+    schedule: &[D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1, D],
+};
+
+pub(super) const REARM_AFTER_DRAINS_LOSES_A_WAKE: ModelWitness = ModelWitness {
+    name: "rearm after drains loses the wake of a notify that skipped on notified",
+    order: &REARM_AFTER_DRAINS,
+    setup: DATAGRAM_TRY_FROM_IDLE,
+    schedule: &[D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1, D],
+};
+
+pub(super) const THE_SWAP_GOES_DEAF_ON_A_READ_OF_EVERY_UNIT: ModelWitness = ModelWitness {
+    name: "rearm before consume goes deaf when a notify sends after the swap and the read takes every unit",
+    order: &REARM_BEFORE_CONSUME,
+    setup: STREAM_TRY_FROM_NOTIFIED,
+    schedule: &[D, N0, N0, N0, D, D, D, D, N0, N1, N1],
+};
+
+pub(super) const THE_SWAP_KEEPS_A_UNIT_ON_A_ONE_UNIT_READ: ModelWitness = ModelWitness {
+    name: "rearm before consume keeps a unit after the swap when the read takes one unit",
+    order: &REARM_BEFORE_CONSUME,
+    setup: DATAGRAM_TRY_FROM_NOTIFIED,
+    schedule: &[D, N0, N0, N0, D, D, D, D, N0, N1, N1],
+};
+
+/// Every witness the tests below replay.
+pub(super) const WITNESSES: [&ModelWitness; 7] = [
+    &REARM_BEFORE_CONSUME_GOES_DEAF,
+    &CONSUME_BEFORE_REARM_KEEPS_THE_WAKE,
+    &REARM_AFTER_DRAINS_IF_NOTIFIED_GOES_DEAF,
+    &REARM_AFTER_DRAINS_IF_NOTIFIED_LOSES_A_WAKE,
+    &REARM_AFTER_DRAINS_LOSES_A_WAKE,
+    &THE_SWAP_GOES_DEAF_ON_A_READ_OF_EVERY_UNIT,
+    &THE_SWAP_KEEPS_A_UNIT_ON_A_ONE_UNIT_READ,
+];
+
+/// Whether the drain is past the first event id of its event state drain.
+fn is_inside_the_event_state_drain(order: &DrainOrder, world: World) -> bool {
+    match world.drain {
+        DrainAt::Arm {
+            notified,
+            step,
+            event_id,
+        } => event_id > 0 && arm(order, notified)[step] == DrainEventState,
+        DrainAt::Check | DrainAt::Done => false,
+    }
+}
+
+/// One step of the real drain: the model's next step, with the event state drained for every
+/// id at once.
+fn real_drain_step(order: &DrainOrder, setup: Setup, world: World) -> Option<World> {
+    let mut next = drain_step(order, setup, world)?;
+    while is_inside_the_event_state_drain(order, next) {
+        next = drain_step(order, setup, next)?;
+    }
+    Some(next)
+}
+
+/// Where the model of [`DRAIN_EVENTS_ORDER`] ends a seam script.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Prediction {
+    pub(super) notified: bool,
+    pub(super) units: u8,
+    /// Activations the drain delivered, per event id: 0 for the start's notify, 1 and 2 for
+    /// notifiers 0 and 1.
+    pub(super) delivered: [u8; EVENT_IDS],
+}
+
+/// Runs `script` against [`DRAIN_EVENTS_ORDER`] as the seam test runs it against the real drain,
+/// with a try wait and a distinct event id per notifier. A notifier step runs at once and does
+/// nothing once that notify ended. A drain step runs the drain's next step, the event state
+/// drain as one step, and does nothing once the drain is done. The drain then runs to its end,
+/// and every notifier the script names runs to the end of its notify, notifier 0 first.
+pub(super) fn predict(start: Start, trigger: TriggerRead, script: &[Actor]) -> Prediction {
+    let order = DRAIN_EVENTS_ORDER;
+    let setup = Setup {
+        start,
+        trigger,
+        wait: Try,
+        ids: [1, 2],
+    };
+    let mut world = start.world();
+    for actor in script {
+        let next = match actor {
+            Actor::Drain => real_drain_step(order, setup, world),
+            Actor::Notifier(n) => notify_step(setup, world, *n),
+        };
+        world = next.unwrap_or(world);
+    }
+    while let Some(next) = real_drain_step(order, setup, world) {
+        world = next;
+    }
+    for notifier in 0..2 {
+        if script.contains(&Actor::Notifier(notifier)) {
+            while let Some(next) = notify_step(setup, world, notifier) {
+                world = next;
+            }
+        }
+    }
+    Prediction {
+        notified: world.state == Notified,
+        units: world.units,
+        delivered: world.delivered,
+    }
+}
 
 #[test]
 fn the_order_drain_events_implements_is_never_deaf_and_never_loses_a_wake() {
@@ -551,35 +847,59 @@ fn the_order_drain_events_implements_is_never_deaf_and_never_loses_a_wake() {
 }
 
 #[test]
-fn every_drain_order_matches_its_committed_verdict() {
-    for (order, expected) in BASELINE {
-        assert_eq!(
-            verdict_over_every_setup(order),
-            expected,
-            "{}:\n{}",
-            order.name,
-            violations(order).join("\n")
-        );
-    }
+fn the_model_explores_32_setups_and_the_table_lists_each_once_in_their_order() {
+    let setups = every_setup();
+    assert_eq!(setups.len(), 32);
+    let listed: Vec<Setup> = VERDICTS.iter().map(|row| row.setup).collect();
+    assert_eq!(listed, setups);
 }
 
 #[test]
-fn the_committed_baseline_fails_every_order_but_consume_before_rearm() {
-    for (order, verdict) in BASELINE {
-        let fails = verdict.deaf || verdict.lost_wake;
-        assert_eq!(
-            fails,
-            order.name != CONSUME_BEFORE_REARM.name,
-            "{}",
-            order.name
-        );
+fn every_drain_order_matches_its_committed_verdict_in_every_setup() {
+    let mut mismatches = Vec::new();
+    for row in &VERDICTS {
+        for (order, expected) in ORDERS.iter().zip(row.verdicts) {
+            let findings = explore(order, row.setup);
+            assert!(findings.worlds_seen > 0 && !findings.ends.is_empty());
+            let found = findings.verdict();
+            if found != expected {
+                mismatches.push(format!(
+                    "{}: {:?}: the search finds {found:?}, the table says {expected:?}",
+                    order.name, row.setup
+                ));
+            }
+        }
     }
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn the_committed_table_fails_every_order_but_consume_before_rearm() {
+    // (setups deaf, setups that lose a wake) per order of ORDERS.
+    let expected = [(24, 0), (24, 20), (0, 20), (0, 0)];
+    for (column, order) in ORDERS.iter().enumerate() {
+        let deaf = VERDICTS
+            .iter()
+            .filter(|row| row.verdicts[column].deaf)
+            .count();
+        let lost_wake = VERDICTS
+            .iter()
+            .filter(|row| row.verdicts[column].lost_wake)
+            .count();
+        assert_eq!((deaf, lost_wake), expected[column], "{}", order.name);
+    }
+    assert_eq!(ORDERS[3].name, CONSUME_BEFORE_REARM.name);
 }
 
 #[test]
 fn rearm_before_consume_goes_deaf_when_a_notify_sends_between_the_rearm_and_the_consume() {
-    let schedule = [D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1];
-    let end = replay(&REARM_BEFORE_CONSUME, DATAGRAM_TRY_FROM_IDLE, &schedule);
+    let witness = &REARM_BEFORE_CONSUME_GOES_DEAF;
+    let end = witness.end();
 
     assert_eq!(
         end,
@@ -592,23 +912,15 @@ fn rearm_before_consume_goes_deaf_when_a_notify_sends_between_the_rearm_and_the_
             notifiers: [NotifyAt::Done; 2],
         }
     );
-    assert!(is_quiescent(
-        &REARM_BEFORE_CONSUME,
-        DATAGRAM_TRY_FROM_IDLE,
-        end
-    ));
+    assert!(is_quiescent(witness.order, witness.setup, end));
     assert!(end.is_deaf());
-    assert!(
-        explore(&REARM_BEFORE_CONSUME, DATAGRAM_TRY_FROM_IDLE)
-            .ends
-            .contains(&end)
-    );
+    assert!(explore(witness.order, witness.setup).ends.contains(&end));
 }
 
 #[test]
 fn consume_before_rearm_keeps_the_wake_of_a_notify_that_sends_during_the_drain() {
-    let schedule = [D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1, N1, N1];
-    let end = replay(&CONSUME_BEFORE_REARM, DATAGRAM_TRY_FROM_IDLE, &schedule);
+    let witness = &CONSUME_BEFORE_REARM_KEEPS_THE_WAKE;
+    let end = witness.end();
 
     assert_eq!(
         end,
@@ -621,27 +933,15 @@ fn consume_before_rearm_keeps_the_wake_of_a_notify_that_sends_during_the_drain()
             notifiers: [NotifyAt::Done; 2],
         }
     );
-    assert!(is_quiescent(
-        &CONSUME_BEFORE_REARM,
-        DATAGRAM_TRY_FROM_IDLE,
-        end
-    ));
+    assert!(is_quiescent(witness.order, witness.setup, end));
     assert!(!end.is_deaf() && !end.loses_a_wake());
-    assert!(
-        explore(&CONSUME_BEFORE_REARM, DATAGRAM_TRY_FROM_IDLE)
-            .ends
-            .contains(&end)
-    );
+    assert!(explore(witness.order, witness.setup).ends.contains(&end));
 }
 
 #[test]
 fn rearm_after_drains_if_notified_goes_deaf_when_the_notifier_marks_after_the_swap() {
-    let schedule = [D, D, D, N0, N0, N0, D, D, D, D, D, N0, N1, N1];
-    let end = replay(
-        &REARM_AFTER_DRAINS_IF_NOTIFIED,
-        DATAGRAM_TRY_FROM_IDLE,
-        &schedule,
-    );
+    let witness = &REARM_AFTER_DRAINS_IF_NOTIFIED_GOES_DEAF;
+    let end = witness.end();
 
     assert_eq!(
         end,
@@ -654,22 +954,14 @@ fn rearm_after_drains_if_notified_goes_deaf_when_the_notifier_marks_after_the_sw
             notifiers: [NotifyAt::Done; 2],
         }
     );
-    assert!(is_quiescent(
-        &REARM_AFTER_DRAINS_IF_NOTIFIED,
-        DATAGRAM_TRY_FROM_IDLE,
-        end
-    ));
+    assert!(is_quiescent(witness.order, witness.setup, end));
     assert!(end.is_deaf());
 }
 
 #[test]
 fn rearm_after_drains_if_notified_loses_the_wake_of_a_notify_that_skipped_on_notified() {
-    let schedule = [D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1, D];
-    let end = replay(
-        &REARM_AFTER_DRAINS_IF_NOTIFIED,
-        DATAGRAM_TRY_FROM_IDLE,
-        &schedule,
-    );
+    let witness = &REARM_AFTER_DRAINS_IF_NOTIFIED_LOSES_A_WAKE;
+    let end = witness.end();
 
     assert_eq!(
         end,
@@ -682,18 +974,14 @@ fn rearm_after_drains_if_notified_loses_the_wake_of_a_notify_that_skipped_on_not
             notifiers: [NotifyAt::Done; 2],
         }
     );
-    assert!(is_quiescent(
-        &REARM_AFTER_DRAINS_IF_NOTIFIED,
-        DATAGRAM_TRY_FROM_IDLE,
-        end
-    ));
+    assert!(is_quiescent(witness.order, witness.setup, end));
     assert!(end.loses_a_wake());
 }
 
 #[test]
 fn rearm_after_drains_loses_the_wake_of_a_notify_that_skipped_on_notified() {
-    let schedule = [D, D, D, N0, N0, N0, D, N0, D, D, D, N1, N1, D];
-    let end = replay(&REARM_AFTER_DRAINS, DATAGRAM_TRY_FROM_IDLE, &schedule);
+    let witness = &REARM_AFTER_DRAINS_LOSES_A_WAKE;
+    let end = witness.end();
 
     assert_eq!(
         end,
@@ -706,20 +994,136 @@ fn rearm_after_drains_loses_the_wake_of_a_notify_that_skipped_on_notified() {
             notifiers: [NotifyAt::Done; 2],
         }
     );
+    assert!(is_quiescent(witness.order, witness.setup, end));
+    assert!(end.loses_a_wake());
+}
+
+#[test]
+fn rearm_before_consume_goes_deaf_when_a_notify_sends_after_the_swap_and_the_read_takes_every_unit()
+{
+    let witness = &THE_SWAP_GOES_DEAF_ON_A_READ_OF_EVERY_UNIT;
+    let end = witness.end();
+
+    assert_eq!(
+        end,
+        World {
+            state: Notified,
+            units: 0,
+            pending: [0, 0, 1],
+            delivered: [1, 1, 0],
+            drain: DrainAt::Done,
+            notifiers: [NotifyAt::Done; 2],
+        }
+    );
+    assert!(is_quiescent(witness.order, witness.setup, end));
+    assert!(end.is_deaf());
+    assert!(explore(witness.order, witness.setup).ends.contains(&end));
+}
+
+#[test]
+fn rearm_before_consume_keeps_a_unit_after_the_swap_when_the_read_takes_one_unit() {
+    let witness = &THE_SWAP_KEEPS_A_UNIT_ON_A_ONE_UNIT_READ;
+    let end = witness.end();
+
+    assert_eq!(
+        end,
+        World {
+            state: Notified,
+            units: 1,
+            pending: [0, 0, 1],
+            delivered: [1, 1, 0],
+            drain: DrainAt::Done,
+            notifiers: [NotifyAt::Done; 2],
+        }
+    );
+    assert!(is_quiescent(witness.order, witness.setup, end));
+    assert!(!end.is_deaf() && !end.loses_a_wake());
+}
+
+#[test]
+fn two_notifies_that_find_the_state_pending_both_send_and_a_drain_leaves_one_unit() {
+    let schedule = [N0, N0, N1, N1, N1, N0, N0, N1, D, D, D, D, D, D];
+    let end = replay(&CONSUME_BEFORE_REARM, DATAGRAM_TRY_FROM_IDLE, &schedule);
+
+    assert_eq!(
+        end,
+        World {
+            state: Idle,
+            units: 1,
+            pending: [0, 0, 0],
+            delivered: [0, 1, 1],
+            drain: DrainAt::Done,
+            notifiers: [NotifyAt::Done; 2],
+        }
+    );
     assert!(is_quiescent(
-        &REARM_AFTER_DRAINS,
+        &CONSUME_BEFORE_REARM,
         DATAGRAM_TRY_FROM_IDLE,
         end
     ));
-    assert!(end.loses_a_wake());
+    assert_eq!(end.state, IdleStrayUnit.world().state);
+    assert_eq!(end.units, IdleStrayUnit.world().units);
+}
+
+#[test]
+fn a_witness_schedule_takes_one_drain_step_per_boundary_of_the_real_drain() {
+    let expected: [&[Actor]; 7] = [
+        &[D, D, D, N0, N0, N0, D, N0, D, N1, N1],
+        &[D, D, D, N0, N0, N0, D, N0, D, N1, N1, N1, N1],
+        &[D, D, D, N0, N0, N0, D, D, D, N0, N1, N1],
+        &[D, D, D, N0, N0, N0, D, N0, D, N1, N1, D],
+        &[D, D, D, N0, N0, N0, D, N0, D, N1, N1, D],
+        &[D, N0, N0, N0, D, D, N0, N1, N1],
+        &[D, N0, N0, N0, D, D, N0, N1, N1],
+    ];
+    for (witness, expected) in WITNESSES.iter().zip(expected) {
+        assert_eq!(witness.boundary_schedule(), expected, "{}", witness.name);
+    }
+}
+
+#[test]
+fn the_prediction_runs_a_script_at_the_real_drain_boundaries_of_consume_before_rearm() {
+    // A notify that sends after the trigger read and marks after the re-arm leaves its unit.
+    assert_eq!(
+        predict(IdleEmpty, OneUnit, &[D, D, D, N0, N0, N0, D, N0, D, N1, N1]),
+        Prediction {
+            notified: true,
+            units: 2,
+            delivered: [0, 1, 0],
+        }
+    );
+    // On a notified start the notify skips on the state the load left notified, and the
+    // second notify claims the idle state after the re-arm, before the event state drain.
+    assert_eq!(
+        predict(
+            NotifiedOneUnit,
+            EveryUnit,
+            &[D, N0, N0, N0, D, D, N0, N1, N1]
+        ),
+        Prediction {
+            notified: true,
+            units: 1,
+            delivered: [1, 1, 1],
+        }
+    );
+    // Drain steps past the end of the drain do nothing. The notifies the script started finish
+    // after it: the first claims and sends, the second skips on the notified state.
+    assert_eq!(
+        predict(IdleStrayUnit, OneUnit, &[D, D, D, D, D, D, D, D, N1, N0]),
+        Prediction {
+            notified: true,
+            units: 1,
+            delivered: [0, 0, 0],
+        }
+    );
 }
 
 #[test]
 fn a_blocking_drain_waits_for_a_unit_and_a_stream_read_takes_every_unit() {
     let setup = Setup {
-        start: Start::IdleStrayUnit,
-        trigger: TriggerRead::EveryUnit,
-        wait: WaitKind::Blocking,
+        start: IdleStrayUnit,
+        trigger: EveryUnit,
+        wait: Blocking,
         ids: [1, 2],
     };
     let after_wait = replay(&CONSUME_BEFORE_REARM, setup, &[N0, N0, N0, D, D]);
@@ -727,7 +1131,7 @@ fn a_blocking_drain_waits_for_a_unit_and_a_stream_read_takes_every_unit() {
     assert_eq!(after_wait.state, Pending);
 
     let blocked = Setup {
-        start: Start::IdleEmpty,
+        start: IdleEmpty,
         ..setup
     };
     let waiting = replay(&CONSUME_BEFORE_REARM, blocked, &[D]);
