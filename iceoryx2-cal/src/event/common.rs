@@ -432,48 +432,38 @@ impl<
     ) -> Result<u64, ListenerWaitError> {
         let mgmt = self.storage.get();
 
-        let mut drain = || -> Result<u64, ListenerWaitError> {
-            fail!(from self, when self.waiter.empty_buffer(),
-                "{msg} since the wait buffer could not be emptied.");
-            #[cfg(test)]
-            drain_gap::reached(drain_gap::DrainGap::AfterEmptyBuffer);
-            let activations = self.storage.get().event.drain(&mut callback);
-            #[cfg(test)]
-            drain_gap::reached(drain_gap::DrainGap::AfterEventStateDrain);
-            Ok(activations)
-        };
-
         #[cfg(test)]
         drain_gap::reached(drain_gap::DrainGap::Entry);
-        if mgmt
-            .notification_state
-            .compare_exchange(
-                NOTIFICATION_STATE_NOTIFIED,
-                NOTIFICATION_STATE_IDLE,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_ok()
-        {
-            // The swap reads the state and re-arms in one step, so both boundaries are here.
-            #[cfg(test)]
-            drain_gap::reached(drain_gap::DrainGap::AfterStateCheck);
-            #[cfg(test)]
-            drain_gap::reached(drain_gap::DrainGap::AfterRearm);
-            return drain();
-        }
+        let notified =
+            mgmt.notification_state.load(Ordering::SeqCst) == NOTIFICATION_STATE_NOTIFIED;
         #[cfg(test)]
         drain_gap::reached(drain_gap::DrainGap::AfterStateCheck);
 
-        fail!(from self, when wait_call(),
-            "{msg} since the underlying wait call failed.");
+        if !notified {
+            fail!(from self, when wait_call(),
+                "{msg} since the underlying wait call failed.");
+            #[cfg(test)]
+            drain_gap::reached(drain_gap::DrainGap::AfterWaitCall);
+        }
+
+        // The trigger is emptied before the state is re-armed. A notify whose byte this drain
+        // takes saw the idle or pending state before the store below, so its mark to notified
+        // is overwritten by the store, fails on the idle state, or lands on the pending state of
+        // a later notify whose byte is still to come. A notify that skipped its send on the
+        // notified state activated its event before the store, so the event state drain after
+        // the store delivers it.
+        fail!(from self, when self.waiter.empty_buffer(),
+            "{msg} since the wait buffer could not be emptied.");
         #[cfg(test)]
-        drain_gap::reached(drain_gap::DrainGap::AfterWaitCall);
+        drain_gap::reached(drain_gap::DrainGap::AfterEmptyBuffer);
         mgmt.notification_state
             .store(NOTIFICATION_STATE_IDLE, Ordering::SeqCst);
         #[cfg(test)]
         drain_gap::reached(drain_gap::DrainGap::AfterRearm);
-        drain()
+        let activations = mgmt.event.drain(&mut callback);
+        #[cfg(test)]
+        drain_gap::reached(drain_gap::DrainGap::AfterEventStateDrain);
+        Ok(activations)
     }
 }
 

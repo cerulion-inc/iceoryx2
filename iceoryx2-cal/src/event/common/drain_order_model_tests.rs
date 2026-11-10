@@ -37,7 +37,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Event ids 0 to 2: id 0 is activated by the start state, the notifiers use ids 1 and 2.
+/// Event ids 0 to 2: the start state activates id 0, the notifiers use ids 1 and 2 or both id 1.
 const EVENT_IDS: usize = 3;
 const PRIOR: usize = 0;
 
@@ -78,7 +78,7 @@ enum StateCheck {
 enum DrainStep {
     /// The trigger wait call of `try_wait()` or `blocking_wait()`.
     WaitCall,
-    /// `empty_buffer()`: one receive.
+    /// `empty_buffer()`: one take from the trigger.
     EmptyBuffer,
     /// `store(IDLE)`.
     Rearm,
@@ -140,7 +140,7 @@ const CONSUME_BEFORE_REARM: DrainOrder = DrainOrder {
 };
 
 /// The order `Waiter::drain_events()` implements.
-const DRAIN_EVENTS_ORDER: &DrainOrder = &REARM_BEFORE_CONSUME;
+const DRAIN_EVENTS_ORDER: &DrainOrder = &CONSUME_BEFORE_REARM;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DrainAt {
