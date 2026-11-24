@@ -10,6 +10,10 @@ readme = "../README.md"
 repository = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
+# No native library: `links` lets the build script pass `DEP_ICEORYX2_*`
+# metadata to the build scripts of the crates that depend on this one.
+links = "iceoryx2"
+build = "build.rs"
 
 [features]
 default = ["std", "console"]
