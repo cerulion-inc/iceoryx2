@@ -3021,7 +3021,7 @@ pub mod service_publish_subscribe {
 
     fn received_values<Sut: Service>(subscriber: &Subscriber<Sut, u64, ()>) -> Vec<u64> {
         let mut values = vec![];
-        while let Ok(Some(sample)) = subscriber.receive() {
+        while let Some(sample) = subscriber.receive().unwrap() {
             values.push(*sample);
         }
         values
