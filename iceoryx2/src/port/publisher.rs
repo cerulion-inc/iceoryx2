@@ -493,13 +493,21 @@ impl<
             .publish_subscribe()
             .subscribers;
 
+        // The samples this publisher retains for late subscribers: its own request, never more
+        // than the service's history size, which is the most a subscriber can request.
+        let history_size = publisher_factory
+            .history_size
+            .map_or(static_config.history_size, |requested| {
+                requested.min(static_config.history_size)
+            });
+
         let number_of_samples = unsafe {
             service
                 .static_config()
                 .messaging_pattern
                 .publish_subscribe()
         }
-        .required_amount_of_samples_per_data_segment(config.max_loaned_samples);
+        .required_amount_of_samples_per_data_segment(config.max_loaned_samples, history_size);
 
         let number_of_samples = publisher_factory
             .preallocate_number_of_samples_override
@@ -585,9 +593,9 @@ impl<
                 },
                 config: *config,
                 subscriber_list_state: UnsafeCell::new(unsafe { subscriber_list.get_state() }),
-                history: match static_config.history_size == 0 {
+                history: match history_size == 0 {
                     true => None,
-                    false => Some(UnsafeCell::new(Queue::new(static_config.history_size))),
+                    false => Some(UnsafeCell::new(Queue::new(history_size))),
                 },
             });
 
@@ -682,6 +690,19 @@ impl<
             .lock()
             .sender
             .sender_max_borrowed_chunks
+    }
+
+    /// Returns how many of its most recently sent samples the [`Publisher`] retains for
+    /// [`Subscriber`](crate::port::subscriber::Subscriber)s that connect later: the value set
+    /// with [`PortFactoryPublisher::history_size()`](crate::service::port_factory::publisher::PortFactoryPublisher::history_size),
+    /// at most the service's history size, or the service's history size when none was set.
+    pub fn history_size(&self) -> usize {
+        match &self.publisher_shared_state.lock().history {
+            None => 0,
+            // The ring is only mutated under the same lock, by the send and
+            // connection-update paths, and its capacity never changes.
+            Some(history) => unsafe { &*history.get() }.capacity(),
+        }
     }
 }
 

@@ -117,6 +117,9 @@ pub struct PortFactoryPublisher<
     pub(crate) degradation_handler: DegradationHandler<'static>,
     pub(crate) backpressure_handler: Option<BackpressureHandler<'static>>,
     pub(crate) preallocate_number_of_samples_override: PreallocatedSamplesOverride<'static>,
+    // Kept on the builder, not in `LocalPublisherConfig`, so the layout of the
+    // publisher's shared state does not change with this field.
+    pub(crate) history_size: Option<usize>,
     pub(crate) factory: &'factory PortFactory<Service, Payload, UserHeader>,
 }
 
@@ -145,6 +148,7 @@ impl<
             degradation_handler: DegradationHandler::new_with(DegradationAction::Warn),
             backpressure_handler: None,
             preallocate_number_of_samples_override: PreallocatedSamplesOverride::new(|v| v),
+            history_size: self.history_size,
         }
     }
 }
@@ -175,6 +179,7 @@ impl<
             degradation_handler: DegradationHandler::new_with(DegradationAction::Warn),
             backpressure_handler: None,
             preallocate_number_of_samples_override: PreallocatedSamplesOverride::new(|v| v),
+            history_size: None,
             factory,
         }
     }
@@ -239,6 +244,16 @@ impl<
     /// Sets the [`PortName`] of the  [`Publisher`].
     pub fn name(mut self, name: &PortName) -> Self {
         self.config.port_name = *name;
+        self
+    }
+
+    /// Defines how many of its most recently sent samples the [`Publisher`] retains for
+    /// [`crate::port::subscriber::Subscriber`]s that connect later. A value above the
+    /// service's history size is clamped to it. Without this call the [`Publisher`] retains
+    /// as many as the service's history size. A [`Publisher`] that retains fewer needs that
+    /// many fewer samples in its data segment.
+    pub fn history_size(mut self, value: usize) -> Self {
+        self.history_size = Some(value);
         self
     }
 

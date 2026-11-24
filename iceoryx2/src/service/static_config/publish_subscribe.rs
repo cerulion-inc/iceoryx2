@@ -76,13 +76,17 @@ impl StaticConfig {
         }
     }
 
+    /// The number of samples a publisher's data segment needs so that it can always loan a
+    /// sample: every subscriber's buffer and borrows, the samples the publisher retains as
+    /// history (`publisher_history_size`, at most [`Self::history_size()`]) and its own loans.
     pub(crate) fn required_amount_of_samples_per_data_segment(
         &self,
         publisher_max_loaned_data: usize,
+        publisher_history_size: usize,
     ) -> usize {
         self.max_subscribers
             * (self.subscriber_max_buffer_size + self.subscriber_max_borrowed_samples)
-            + self.history_size
+            + publisher_history_size
             + publisher_max_loaned_data
     }
 

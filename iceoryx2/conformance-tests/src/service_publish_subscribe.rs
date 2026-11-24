@@ -21,7 +21,7 @@ pub mod service_publish_subscribe {
 
     use iceoryx2::config::Config;
     use iceoryx2::port::publisher::PublisherCreateError;
-    use iceoryx2::port::subscriber::SubscriberCreateError;
+    use iceoryx2::port::subscriber::{Subscriber, SubscriberCreateError};
     use iceoryx2::port::update_connections::UpdateConnections;
     use iceoryx2::port::{BackpressureAction, LoanError, SendError};
     use iceoryx2::prelude::{AllocationStrategy, *};
@@ -2031,6 +2031,7 @@ pub mod service_publish_subscribe {
         max_borrow: usize,
         max_subscribers: usize,
         max_loan: usize,
+        publisher_history_size: Option<usize>,
     ) {
         let test = Test::<Sut>::new();
         let node = test.create_node();
@@ -2049,11 +2050,11 @@ pub mod service_publish_subscribe {
             .create()
             .unwrap();
 
-        let sut_publisher = sut
-            .publisher_builder()
-            .max_loaned_samples(max_loan)
-            .create()
-            .unwrap();
+        let mut publisher_builder = sut.publisher_builder().max_loaned_samples(max_loan);
+        if let Some(publisher_history_size) = publisher_history_size {
+            publisher_builder = publisher_builder.history_size(publisher_history_size);
+        }
+        let sut_publisher = publisher_builder.create().unwrap();
 
         let mut subscribers = vec![];
         for _ in 0..max_subscribers {
@@ -2121,6 +2122,7 @@ pub mod service_publish_subscribe {
             MAX_BORROW,
             MAX_SUBSCRIBERS,
             MAX_LOAN,
+            None,
         );
     }
 
@@ -2138,6 +2140,7 @@ pub mod service_publish_subscribe {
             MAX_BORROW,
             MAX_SUBSCRIBERS,
             MAX_LOAN,
+            None,
         );
     }
 
@@ -2155,6 +2158,7 @@ pub mod service_publish_subscribe {
             MAX_BORROW,
             MAX_SUBSCRIBERS,
             MAX_LOAN,
+            None,
         );
     }
 
@@ -2172,6 +2176,7 @@ pub mod service_publish_subscribe {
             MAX_BORROW,
             MAX_SUBSCRIBERS,
             MAX_LOAN,
+            None,
         );
     }
 
@@ -2189,6 +2194,7 @@ pub mod service_publish_subscribe {
             MAX_BORROW,
             MAX_SUBSCRIBERS,
             MAX_LOAN,
+            None,
         );
     }
 
@@ -2206,6 +2212,7 @@ pub mod service_publish_subscribe {
             MAX_BORROW,
             MAX_SUBSCRIBERS,
             MAX_LOAN,
+            None,
         );
     }
 
@@ -2997,6 +3004,139 @@ pub mod service_publish_subscribe {
             assert_that!(*sample, eq(expected_sample_value as _));
         }
         assert_that!(sample_count, eq(HISTORY_SIZE / 4));
+    }
+
+    fn history_service<Sut: Service>(
+        node: &Node<Sut>,
+        history_size: usize,
+    ) -> iceoryx2::service::port_factory::publish_subscribe::PortFactory<Sut, u64, ()> {
+        node.service_builder(&generate_service_name())
+            .publish_subscribe::<u64>()
+            .history_size(history_size)
+            .subscriber_max_buffer_size(history_size * 2)
+            .max_publishers(3)
+            .create()
+            .unwrap()
+    }
+
+    fn received_values<Sut: Service>(subscriber: &Subscriber<Sut, u64, ()>) -> Vec<u64> {
+        let mut values = vec![];
+        while let Some(sample) = subscriber.receive().unwrap() {
+            values.push(*sample);
+        }
+        values
+    }
+
+    #[conformance_test]
+    pub fn publisher_history_size_defaults_to_the_service_history_size<Sut: Service>() {
+        let test = Test::<Sut>::new();
+        let node = test.create_node();
+        let sut = history_service::<Sut>(&node, 8);
+
+        let publisher = sut.publisher_builder().create().unwrap();
+
+        assert_that!(publisher.history_size(), eq 8);
+    }
+
+    #[conformance_test]
+    pub fn publisher_history_size_is_clamped_to_the_service_history_size<Sut: Service>() {
+        let test = Test::<Sut>::new();
+        let node = test.create_node();
+        let sut = history_service::<Sut>(&node, 8);
+
+        let publisher = sut.publisher_builder().history_size(100).create().unwrap();
+        for value in 0..12 {
+            publisher.send_copy(value).unwrap();
+        }
+        let subscriber = sut
+            .subscriber_builder()
+            .history_request(8)
+            .create()
+            .unwrap();
+        publisher.update_connections().unwrap();
+
+        assert_that!(publisher.history_size(), eq 8);
+        assert_that!(received_values(&subscriber), eq vec![4, 5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[conformance_test]
+    pub fn publisher_with_history_size_zero_delivers_no_history<Sut: Service>() {
+        let test = Test::<Sut>::new();
+        let node = test.create_node();
+        let sut = history_service::<Sut>(&node, 8);
+
+        let publisher = sut.publisher_builder().history_size(0).create().unwrap();
+        for value in 0..12 {
+            publisher.send_copy(value).unwrap();
+        }
+        let subscriber = sut
+            .subscriber_builder()
+            .history_request(8)
+            .create()
+            .unwrap();
+        publisher.update_connections().unwrap();
+        publisher.send_copy(12).unwrap();
+
+        assert_that!(publisher.history_size(), eq 0);
+        assert_that!(received_values(&subscriber), eq vec![12]);
+    }
+
+    #[conformance_test]
+    pub fn publisher_delivers_at_most_its_own_history_size<Sut: Service>() {
+        let test = Test::<Sut>::new();
+        let node = test.create_node();
+        let sut = history_service::<Sut>(&node, 8);
+
+        let shallow = sut.publisher_builder().history_size(3).create().unwrap();
+        let deep = sut.publisher_builder().create().unwrap();
+        for value in 0..12 {
+            shallow.send_copy(value).unwrap();
+            deep.send_copy(100 + value).unwrap();
+        }
+        let subscriber = sut
+            .subscriber_builder()
+            .history_request(8)
+            .create()
+            .unwrap();
+        shallow.update_connections().unwrap();
+        deep.update_connections().unwrap();
+
+        assert_that!(
+            received_values(&subscriber),
+            eq vec![9, 10, 11, 104, 105, 106, 107, 108, 109, 110, 111]
+        );
+    }
+
+    #[conformance_test]
+    pub fn publisher_data_segment_holds_only_the_history_it_retains<Sut: Service>() {
+        let test = Test::<Sut>::new();
+        let node = test.create_node();
+        let sut = history_service::<Sut>(&node, 8);
+
+        let _retains_all = sut.publisher_builder().create().unwrap();
+        let _retains_three = sut.publisher_builder().history_size(3).create().unwrap();
+        let _retains_none = sut.publisher_builder().history_size(0).create().unwrap();
+
+        let mut number_of_samples = vec![];
+        sut.dynamic_config().list_publishers(|details| {
+            number_of_samples.push(details.number_of_samples);
+            CallbackProgression::Continue
+        });
+        number_of_samples.sort_unstable();
+
+        assert_that!(number_of_samples, len 3);
+        assert_that!(number_of_samples[1], eq number_of_samples[0] + 3);
+        assert_that!(number_of_samples[2], eq number_of_samples[0] + 8);
+    }
+
+    #[conformance_test]
+    pub fn publisher_retaining_no_history_never_goes_out_of_memory<Sut: Service>() {
+        publisher_never_goes_out_of_memory_impl::<Sut>(5, 7, 3, 2, 4, Some(0));
+    }
+
+    #[conformance_test]
+    pub fn publisher_retaining_part_of_the_history_never_goes_out_of_memory<Sut: Service>() {
+        publisher_never_goes_out_of_memory_impl::<Sut>(5, 7, 3, 2, 4, Some(3));
     }
 
     #[conformance_test]
