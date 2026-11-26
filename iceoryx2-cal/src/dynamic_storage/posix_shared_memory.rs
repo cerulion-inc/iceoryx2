@@ -47,6 +47,12 @@
 //! storage.get().store(456, Ordering::Relaxed);
 //!
 //! ```
+//!
+//! [`Builder::open_or_create()`](DynamicStorageBuilder::open_or_create()) retries for at most
+//! the [`Builder::timeout()`](DynamicStorageBuilder::timeout()) when the name is taken but
+//! nothing can be opened under it, and then fails with
+//! [`DynamicStorageOpenError::InitializationNotYetFinalized`]. Remove the stale storage
+//! before retrying.
 pub use crate::dynamic_storage::*;
 pub use core::ops::Deref;
 
@@ -454,11 +460,11 @@ impl<'builder, T: Send + Sync + Debug + ZeroCopySend> DynamicStorageBuilder<'bui
                         return Ok(self.init_impl(shm)?);
                     }
                     // Another process created or removed the storage between the open and
-                    // the create call. The first retry runs at once, since that race is
-                    // over by then. A collision that outlasts the timeout is no race: on
-                    // platforms that emulate POSIX shared memory with a state file, a
-                    // process that stopped during creation leaves the name taken while no
-                    // shared memory exists under it.
+                    // the create call. The first retry runs at once: what it created can be
+                    // opened now, and what it removed can be created. A collision that
+                    // outlasts the timeout is no race: on platforms that emulate POSIX shared
+                    // memory with a state file, a process that stopped during creation leaves
+                    // the name taken while no shared memory exists under it.
                     Err(DynamicStorageCreateError::AlreadyExists) => {
                         if is_first_collision {
                             is_first_collision = false;

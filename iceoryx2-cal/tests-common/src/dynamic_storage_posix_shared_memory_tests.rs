@@ -138,7 +138,8 @@ mod dangling_state_file {
     type SutConfig = <Sut as NamedConceptMgmt>::Configuration;
 
     const STATE_FILE_SUFFIX: &[u8] = b".shm_state";
-    // The state file holds the real shared memory name in a 33 byte field.
+    // On macOS the state file holds the real shared memory name in a 33 byte
+    // field. FreeBSD only checks that the state file exists.
     const REAL_NAME_FIELD_LEN: usize = 33;
     // Real names start with the creator's pid. No iceoryx2 process has pid 0,
     // so no shared memory with this real name exists.
@@ -252,7 +253,6 @@ mod dangling_state_file {
         let storage_name = generate_file_path().file_name();
         let config = generate_isolated_config::<Sut>();
         let state_file = plant_state_file(&storage_name, &config, &dangling_name_content());
-        state_file.release_ownership();
 
         // Nothing can be opened under the name, yet the name is taken.
         let sut = <Sut as DynamicStorage<TestData>>::Builder::new(&storage_name)
@@ -265,6 +265,7 @@ mod dangling_state_file {
             .create();
         assert_that!(sut.err(), eq Some(DynamicStorageCreateError::AlreadyExists));
 
+        state_file.release_ownership();
         let shm_name = config.path_for(&storage_name).file_name();
         assert_that!(SharedMemory::remove(&shm_name), is_ok);
         assert_that!(File::remove(&state_file_path(&storage_name, &config)), eq Ok(false));
