@@ -47,6 +47,12 @@
 //! storage.get().store(456, Ordering::Relaxed);
 //!
 //! ```
+//!
+//! [`Builder::open_or_create()`](DynamicStorageBuilder::open_or_create()) retries for at most
+//! the [`Builder::timeout()`](DynamicStorageBuilder::timeout()) when the name is taken but
+//! nothing can be opened under it, and then fails with
+//! [`DynamicStorageOpenError::InitializationNotYetFinalized`]. Remove the stale storage
+//! before retrying.
 pub use crate::dynamic_storage::*;
 pub use core::ops::Deref;
 
@@ -437,6 +443,15 @@ impl<'builder, T: Send + Sync + Debug + ZeroCopySend> DynamicStorageBuilder<'bui
     }
 
     fn open_or_create(mut self) -> Result<Storage<T>, DynamicStorageOpenOrCreateError> {
+        let msg = "Failed to open or create posix_shared_memory::DynamicStorage";
+        let mut wait_for_concurrent_creator = fail!(from self,
+                                    when AdaptiveWaitBuilder::new()
+                                        .strategy(AdaptiveWaitStrategy::FixedTicks(Duration::from_millis(1))).create(),
+                                    with DynamicStorageOpenOrCreateError::DynamicStorageOpenError(DynamicStorageOpenError::InternalError),
+                                    "{} since the AdaptiveWait could not be initialized.", msg);
+
+        let mut elapsed_time = Duration::ZERO;
+        let mut is_first_collision = true;
         loop {
             match self.open_impl(AccessMode::ReadWrite) {
                 Ok(storage) => return Ok(storage),
@@ -444,7 +459,28 @@ impl<'builder, T: Send + Sync + Debug + ZeroCopySend> DynamicStorageBuilder<'bui
                     Ok(shm) => {
                         return Ok(self.init_impl(shm)?);
                     }
-                    Err(DynamicStorageCreateError::AlreadyExists) => continue,
+                    // Another process created or removed the storage between the open and
+                    // the create call. The first retry runs at once: what it created can be
+                    // opened now, and what it removed can be created. A collision that
+                    // outlasts the timeout is no race: on platforms that emulate POSIX shared
+                    // memory with a state file, a process that stopped during creation leaves
+                    // the name taken while no shared memory exists under it.
+                    Err(DynamicStorageCreateError::AlreadyExists) => {
+                        if is_first_collision {
+                            is_first_collision = false;
+                            continue;
+                        }
+
+                        if elapsed_time >= self.timeout {
+                            fail!(from self, with DynamicStorageOpenOrCreateError::DynamicStorageOpenError(DynamicStorageOpenError::InitializationNotYetFinalized),
+                                "{} since the name stays taken but no storage could be opened under it within {:?}. A process that stopped during creation can leave this stale state behind; remove the stale storage before retrying.",
+                                msg, self.timeout);
+                        }
+
+                        elapsed_time = fail!(from self, when wait_for_concurrent_creator.wait(),
+                                    with DynamicStorageOpenOrCreateError::DynamicStorageOpenError(DynamicStorageOpenError::InternalError),
+                                    "{} since the adaptive wait call failed.", msg);
+                    }
                     Err(e) => return Err(e.into()),
                 },
                 Err(e) => return Err(e.into()),
